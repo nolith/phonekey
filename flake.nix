@@ -151,8 +151,8 @@
               enable = lib.mkEnableOption "this instance" // { default = true; };
               vapidSubject = lib.mkOption {
                 type = lib.types.str;
-                example = "mailto:you@example.com";
-                description = "Contact for push services (a mailto: or https: URL).";
+                example = "you@example.com";
+                description = "Contact for push services: an email address or an https: URL.";
               };
               tailscale = {
                 hostname = lib.mkOption {

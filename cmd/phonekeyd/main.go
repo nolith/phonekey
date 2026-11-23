@@ -89,7 +89,7 @@ func serve(ctx context.Context, st *store.Store, dbPath string, args []string) e
 	fs.StringVar(&cfg.RPName, "rp-name", "phonekey", "WebAuthn RP display name")
 	fs.StringVar(&cfg.Salt, "salt", "", "PRF salt (default phonekey/ssh-ed25519/v1)")
 	fs.StringVar(&cfg.VAPIDSubject, "vapid-subject", os.Getenv("PHONEKEY_VAPID_SUBJECT"),
-		"VAPID subject, a mailto: or https: URL; Apple rejects placeholders ($PHONEKEY_VAPID_SUBJECT)")
+		"VAPID subject, an email address or https: URL; Apple rejects placeholders ($PHONEKEY_VAPID_SUBJECT)")
 	fs.DurationVar(&cfg.DefaultTTL, "default-ttl", 90*time.Second, "request lifetime when the agent doesn't ask for one")
 	fs.DurationVar(&cfg.MaxTTL, "max-ttl", 5*time.Minute, "longest request lifetime an agent may ask for")
 	fs.DurationVar(&cfg.SessionTTL, "session-ttl", 30*24*time.Hour, "web session lifetime")

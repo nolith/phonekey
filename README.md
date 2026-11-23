@@ -76,7 +76,7 @@ library, and serves HTTPS only there.
 
 ```sh
 phonekeyd --db ~/phonekey/phonekey.db serve \
-  --tailscale-hostname phonekey --vapid-subject mailto:you@example.com
+  --tailscale-hostname phonekey --vapid-subject you@example.com
 ```
 
 - **First login.** It uses an auth key (`--tailscale-authkey-file`, or
@@ -107,7 +107,7 @@ tailscaled can always open it.
 
 ```sh
 phonekeyd --db ~/phonekey/phonekey.db serve --addr unix:$XDG_RUNTIME_DIR/phonekey.sock \
-  --vapid-subject mailto:you@example.com
+  --vapid-subject you@example.com
 sudo tailscale serve --bg --https=8443 unix:$XDG_RUNTIME_DIR/phonekey.sock   # undo: sudo tailscale serve --https=8443 off
 ```
 
@@ -136,13 +136,13 @@ modules = [
       # The host's Tailscale: https://<host>.<tailnet>.ts.net:8443, proxied to
       # /run/phonekeyd-samuel/http.sock.
       samuel = {
-        vapidSubject = "mailto:samuel@example.com";
+        vapidSubject = "samuel@example.com";
         serve.httpsPort = 8443;
       };
       # Its own tailnet machine: https://phonekey-alice.<tailnet>.ts.net, nothing
       # listening on the host.
       alice = {
-        vapidSubject = "mailto:alice@example.com";
+        vapidSubject = "alice@example.com";
         tailscale.hostname = "phonekey-alice";
         tailscale.authKeyFile = "/run/secrets/alice-ts-authkey";  # optional; otherwise journalctl -u phonekeyd-alice
       };
@@ -206,7 +206,7 @@ modules = [
   - In the built-in mode the name stays the same wherever the backend runs, as
     long as the node state moves along.
   - With the host's Tailscale, the hostname is the host's.
-- **VAPID subject.** Push services need a contact: a `mailto:` address or an
+- **VAPID subject.** Push services need a contact: an email address or an
   `https:` URL (the backend's own URL works). Apple's push service rejects some
   placeholders.
 

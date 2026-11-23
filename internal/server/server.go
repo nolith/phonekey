@@ -62,7 +62,7 @@ func (c *Config) defaults() {
 		c.Salt = keyderive.DefaultSalt
 	}
 	if c.VAPIDSubject == "" {
-		c.VAPIDSubject = "mailto:phonekey@example.com"
+		c.VAPIDSubject = "phonekey@example.com"
 	}
 	if c.DefaultTTL == 0 {
 		c.DefaultTTL = 90 * time.Second
