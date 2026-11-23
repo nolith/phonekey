@@ -1,191 +1,537 @@
-# phonekey (PoC)
+# phonekey
 
-Approve SSH logins and commit signatures on your phone with a passkey. An
-ssh-agent on the dev box hands each signing request to `phonekeyd`, which
-pushes a notification to a web app. The web app derives an ordinary
-`ssh-ed25519` key from the passkey's PRF output, signs, and forgets the key.
+Approve SSH logins and commit signatures with a passkey, on your phone or in a
+desktop browser.
 
-Design brief: <https://claude.ai/artifact/U11KvJataYt3YFH1ncZSKN>
+An ssh-agent on the dev box passes every signing request to a small backend,
+`phonekeyd`. The backend sends a push notification to its web app. You see what's
+being signed, approve with Face ID, and the page derives an ordinary
+`ssh-ed25519` key from the passkey, signs in the browser and forgets the key. No
+private key is stored anywhere: not on the dev box, not on the backend, not in a
+vault.
 
-## Layout
+Status: proof of concept. The design brief is at
+<https://claude.ai/artifact/U11KvJataYt3YFH1ncZSKN>. The dev box side, the backend
+and the page are tested end to end (see [Development](#development)). Desktop
+Chrome has been used by hand. iOS hasn't been tried yet.
 
-| Path | What |
-| --- | --- |
-| `cmd/phonekeyd` | backend: queue, dev box API, web API, Web Push, embedded web app, SQLite |
-| `cmd/phonekey-agent` | ssh-agent for the dev box |
-| `cmd/phonekey-keygen` | `ssh-keygen` shim for jj so the phone can show jj commits (see below) |
-| `cmd/phonekey-sim` | fake phone: same web API as the page, key from a fixed secret |
-| `web/` | approval web app (no build step, no third-party scripts except vendored `noble-ed25519`) |
-| `internal/` | `server`, `store`, `agent`, `sshwire` (userauth/SSHSIG/session-bind parsing), `keyderive`, `protocol`, `sim` |
-| `e2e/` | end-to-end tests: real OpenSSH/git/jj against an sshd container, and the real page in headless Chromium |
+- [Setting up](#setting-up)
+- [Using it](#using-it)
+- [How it works](#how-it-works)
+- [Threat model](#threat-model)
+- [Development](#development)
+- [Open questions and future work](#open-questions-and-future-work)
 
-```sh
-nix develop                 # go, openssh, git, jj, chromium
-go build -o bin/ ./cmd/...
-go test ./internal/...      # unit + in-process integration
-go test -tags e2e ./e2e     # needs docker and chromium; builds a small alpine sshd image
+## Setting up
+
+You need four things: the backend running somewhere your phone can reach over
+HTTPS, a passkey paired with it, the agent on each dev box, and git/jj/ssh
+pointed at the agent.
+
+### 1. Run the backend
+
+The backend should run on a host other than the dev boxes, or at least under a
+separate account: whoever controls it controls the page that handles your key
+(see [Threat model](#threat-model)). It needs a writable directory for its
+SQLite database.
+
+The phone needs a real HTTPS hostname. The simplest way to get one is your
+tailnet, so nothing is exposed to the internet. There are three ways to run it.
+
+**NixOS** (e.g. a small VPS): import the flake's module.
+
+```nix
+# flake inputs: phonekey.url = "github:<you>/phonekey";
+modules = [
+  phonekey.nixosModules.default
+  {
+    services.phonekeyd = {
+      enable = true;
+      vapidSubject = "mailto:you@example.com";
+      tailscale.hostname = "phonekey";                    # https://phonekey.<tailnet>.ts.net
+      tailscale.authKeyFile = "/run/secrets/ts-authkey";  # optional, see below
+    };
+  }
+];
 ```
 
-The e2e tests never touch your real setup: temporary `HOME`, `GIT_CONFIG_GLOBAL`,
-`JJ_CONFIG`, `ssh -F /dev/null` with explicit known_hosts and `IdentityAgent`.
-Each test starts its own sshd container and removes it afterwards.
+Admin commands then run as root: `phonekeyd-ctl pair-code`,
+`phonekeyd-ctl devbox add <name>`, `phonekeyd-ctl keys`.
 
-## What's verified
-
-Automated, on this box (OpenSSH 10.6p1, git 2.56, jj 0.47.1, Chromium 158):
-
-- `git clone`/`push` over SSH through the agent, with `session-bind@openssh.com`
-  verified and the server named from known_hosts; unbound sessions refused.
-  As in OpenSSH's ssh-agent, userauth is only signed for the most recent
-  binding on a connection and never for one made to forward the agent; logins
-  through a forwarded agent are flagged on the phone.
-- `git commit -S` and `git tag -s`: the agent reads git's buffer file, checks
-  its hash against the SSHSIG blob, and the phone sees author/subject/body.
-  `git verify-commit` / `verify-tag` pass.
-- `git rebase --gpg-sign` over 3 commits: 3 requests sharing one grant scope.
-  In the page, *Approve + rest of "git rebase …"* signs the first and the
-  grant signs the other two; no grant is offered for a lone `ssh-keygen`.
-- While a grant may be open, a request from the same command holds its push
-  back for 2 s and drops it if the grant signed it, so auto-signed requests
-  don't each produce a notification.
-- jj with `revsets.git-sign-on-push`: `jj git push` of two commits = 2 SSHSIG
-  + 1 login, all in one scope; with `phonekey-keygen` the phone sees both
-  commit subjects and jj change ids (from the commit's `change-id` header). Pushed commits verify with plain git and `jj log` says `good`.
-- Deny on the phone fails the push; Ctrl-C (SIGINT to the process group)
-  cancels the request on the backend; no answer → agent gives up at its deadline.
-- Of two requests pending at once, only the one that arrived first (or the
-  one whose notification was tapped) is preselected.
-- The real page in headless Chromium with a virtual authenticator that
-  supports PRF: create passkey → derive → pair → approve an `ssh-keygen -Y
-  sign` → grant auto-signs the remaining 2 commits of a rebase → the
-  diagnostics "Sign test message" output verifies with `ssh-keygen -Y verify`.
-  The page's HKDF output is byte-identical to the Go mirror, and Chromium's
-  WebCrypto Ed25519 passes the RFC 8032 vectors. The diagnostics signature is
-  also checked with the noble-ed25519 fallback forced.
-- Push: VAPID-signed, aes128gcm-encrypted request reaches a (fake) push service.
-- *Recent* shows whether you or a grant signed each request, the command it
-  came from, and the same details as the pending card.
-
-Not verifiable here (needs your devices): PRF on iOS (iCloud Keychain and
-1Password), in the home-screen app; Safari's Ed25519; real push delivery;
-same key on iPhone and Mac; GitHub. See the checklist below.
-
-## Try it locally without a phone
+**Any Linux account, no root needed**: phonekeyd joins the tailnet itself, as its
+own machine, through Tailscale's `tsnet` library.
 
 ```sh
-export PHONEKEY_DB=/tmp/phonekey.db
-bin/phonekeyd serve --addr 127.0.0.1:8080 &
-TOKEN=$(bin/phonekeyd devbox add mybox)
-bin/phonekey-sim --url http://localhost:8080 pair "$(bin/phonekeyd pair-code)"
-PHONEKEY_TOKEN=$TOKEN bin/phonekey-agent --backend http://localhost:8080 --socket /tmp/pk.sock &
-bin/phonekey-sim --url http://localhost:8080 watch --ask &   # prompts y/N per request
-SSH_AUTH_SOCK=/tmp/pk.sock ssh-add -L
+phonekeyd --db ~/phonekey/phonekey.db serve \
+  --tailscale-hostname phonekey --vapid-subject mailto:you@example.com
 ```
 
-`localhost` is a secure context, so the page itself also works at
-<http://localhost:8080> in a desktop browser whose passkey provider supports
-PRF; `e2e/browser_test.go` drives it that way with a CDP virtual authenticator.
+Admin commands use the same database:
+`phonekeyd --db ~/phonekey/phonekey.db pair-code`.
 
-## Phone checklist (milestone M0)
+**Behind an existing `tailscale serve`** (needs root or a Tailscale operator
+account on that host): run `phonekeyd serve` on its default `127.0.0.1:8080`,
+then `tailscale serve --bg http://127.0.0.1:8080`.
 
-The phone needs HTTPS with a valid certificate. Easiest is Tailscale serve on
-the box running phonekeyd (this changes your tailscale serve config, so it's
-your call; `tailscale serve reset` undoes it):
+Notes for the tailnet modes:
+
+- **Tailnet settings.** The tailnet needs MagicDNS and HTTPS certificates
+  enabled (admin console → DNS). Without them, phonekeyd says which one is
+  missing.
+- **First login.** It uses an auth key (`--tailscale-authkey-file`, or
+  `$TS_AUTHKEY`). Without one, phonekeyd logs a login URL and waits for you to
+  approve the machine. The node state is kept in `tailscale/` next to the
+  database, so later starts don't need either.
+- **Key expiry.** Consider disabling key expiry for the `phonekey` machine in the
+  admin console, or it drops off the tailnet when its node key expires.
+- **Local listener.** `--addr` (default `127.0.0.1:8080`) keeps a plain HTTP
+  listener alongside the tailnet one, for an agent on the same host. Set it to
+  `''` to turn it off.
+
+**Pick the hostname once.** The passkey, and so the derived SSH key, is bound to
+the page's hostname. Moving to a different hostname means a new passkey and new
+keys on GitHub. With `tailscale.hostname` the name stays the same wherever the
+backend runs, as long as the node state moves along. `--rp-id` can bind passkeys
+to a parent domain instead.
+
+**VAPID subject.** Push services need a contact address. Apple's push service
+rejects some placeholders, so use a real one.
+
+### 2. Pair a passkey
+
+On the backend host, get a one-time code (valid 10 minutes):
 
 ```sh
-bin/phonekeyd serve --addr 127.0.0.1:8080 --vapid-subject mailto:you@example.com
-tailscale serve --bg http://127.0.0.1:8080     # https://<host>.<tailnet>.ts.net
+phonekeyd --db … pair-code        # or: sudo phonekeyd-ctl pair-code
 ```
 
-The passkey (and so the derived key) is bound to that hostname. For the PoC
-the passkey is throwaway; for real use pick the final domain first, or set
-`--rp-id` to a parent domain.
+**iPhone.** Use iCloud Keychain as the passkey provider. It approves with just
+Face ID, and a 1Password-held passkey adds 1Password's own unlock.
+1. Open `https://phonekey.<tailnet>.ts.net` in Safari, then Share → **Add to
+   Home Screen**.
+2. Open phonekey from the home screen. Push only works inside the installed
+   app, which has its own storage separate from Safari.
+3. Enter the code and tap **Create passkey**. If the provider doesn't support
+   PRF, the page says so.
+4. Under **Notifications, grants and keys**, tap **Enable notifications**, then
+   **Send test**.
 
-1. **Safari on the iPhone**: open the URL, expand *Diagnostics*. Note the
-   WebCrypto Ed25519 line (WebKit bug 262499). If it fails, the page uses
-   noble automatically; you can force either one there.
-2. `phonekeyd pair-code`, enter it, *Create passkey* with iCloud Keychain.
-   If PRF isn't supported you'll get an explicit error. Copy the key it shows.
-3. *Diagnostics → Sign test message*. Paste the shown snippet into a shell on
-   any machine with OpenSSH: it must print `Good "phonekey-test" signature`.
-4. *Diagnostics → Derive key* and note the fingerprint.
-5. Share → *Add to Home Screen*, open it from there, repeat 3 and 4 inside the
-   app. Same fingerprint = PRF works in the standalone app.
-6. In the app: *Notifications → Enable*, then *Send test*.
-7. On the Mac (Safari, then Chrome): open the URL, *Log in with passkey* with
-   the synced iCloud passkey, *Derive key* → same fingerprint expected.
-8. Repeat 2–5 with 1Password as the passkey provider (*Add another passkey*
-   while logged in; no code needed). It derives a different key, which is fine.
-9. Dev box: run the agent against it and `ssh-keygen -Y sign` something, or
-   go straight to git (below). Then GitHub: add the key as an *Authentication*
-   and a *Signing* key, `ssh -T git@github.com`, push a signed commit, check
-   it shows Verified, and time how long GitHub waits during login (sets
-   `--deadline`).
+**Desktop browser.** Open the same URL, or a forwarded
+`http://localhost:<port>`, which browsers treat as secure. Pair the same way.
+Notifications work from a normal tab. On macOS they also have to be allowed for
+the browser in System Settings → Notifications.
 
-## Using it on a dev box
+**Another device.** If your passkey syncs (e.g. iCloud Keychain to your Mac),
+tap **Log in with passkey** there instead of pairing again: the same passkey
+derives the same key. A passkey from another provider derives a different key.
+Add it with **Add another passkey** while logged in.
+
+After pairing, the page shows the `ssh-ed25519 …` key. Add it on GitHub twice,
+as an **Authentication key** and as a **Signing key**.
+
+### 3. Run the agent on each dev box
+
+On the backend host, register the dev box and copy the token it prints. The
+backend stores only a hash, so the token can't be shown again.
 
 ```sh
-phonekey-agent --backend https://<host> --token-file ~/.config/phonekey/token \
-  [--upstream /run/user/1000/op-agent.sock]   # also offer 1Password's keys
-export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock
-ssh-add -L > ~/.ssh/phonekey.pub
+phonekeyd --db … devbox add mybox > mybox.token     # or: sudo phonekeyd-ctl devbox add mybox
 ```
 
-git: `gpg.format = ssh`, `user.signingkey = ~/.ssh/phonekey.pub`.
+On the dev box:
 
-jj:
+```sh
+phonekey-agent --backend https://phonekey.<tailnet>.ts.net --token-file ~/.config/phonekey/token \
+  [--socket $XDG_RUNTIME_DIR/phonekey-agent.sock] \
+  [--upstream /run/user/1000/op-agent.sock]
+```
+
+- **`--upstream`** also offers another agent's keys, e.g. a forwarded 1Password
+  agent. Signing requests for those keys go to that agent unchanged.
+- **The phone key** comes from the backend, which hands it to registered dev
+  boxes. `--keys FILE` pins it instead.
+- **Export the public key** once, to point tools at:
+  ```sh
+  SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | head -1 > ~/.ssh/phonekey.pub
+  ```
+
+To keep the agent running, a systemd user unit is enough (no root needed). For
+example, `~/.config/systemd/user/phonekey-agent.service`:
+
+```ini
+[Service]
+ExecStart=%h/bin/phonekey-agent --backend https://phonekey.<tailnet>.ts.net --token-file %h/.config/phonekey/token
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+### 4. Point git, jj and ssh at it
+
+The agent's socket only needs to be `SSH_AUTH_SOCK` for the processes that sign:
+
+```sh
+export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock      # bash
+$env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
+```
+
+Alternatively, leave `SSH_AUTH_SOCK` alone and set `IdentityAgent` in
+`~/.ssh/config` for ssh. git and jj signing need the environment variable.
+
+**git**
+
+```ini
+[gpg]
+	format = ssh
+[user]
+	signingkey = ~/.ssh/phonekey.pub
+```
+
+**jj.** Sign when pushing, so one approval covers the push:
 
 ```toml
 [signing]
-behavior = "drop"            # don't sign on every rewrite...
+behavior = "drop"                # don't sign on every rewrite...
 backend = "ssh"
 key = "~/.ssh/phonekey.pub"
 
 [signing.backends.ssh]
-program = "phonekey-keygen"  # lets the phone show jj's commits
+program = "phonekey-keygen"      # lets the phone show jj's commits
 
 [revsets]
-git-sign-on-push = "~signed() & mine()"   # ...sign when pushing
+git-sign-on-push = "~signed() & mine()"   # ...sign the pushed commits instead
 ```
 
-Without the shim jj pipes the commit to `ssh-keygen` on stdin and the phone
-can only show "Sign git object for jj git push"; the signature is the same
-either way.
+jj passes the commit to `ssh-keygen` on stdin, so the agent can't see it.
+`phonekey-keygen` writes stdin to a temporary file and passes that instead, the
+way git does. The phone can then show the commit's subject, author and change
+id. Signatures are identical either way.
 
-## Knobs for the undecided parts
+**ssh**
 
-| Decision | Default | Where |
-| --- | --- | --- |
-| Grants | chosen per approval with *Approve + rest of "<command>"*; window 30 s, capped by the server | page *Grant length* setting, `phonekeyd serve --max-grant` (0 removes the button) |
-| Agent deadline | 90 s | `phonekey-agent --deadline` (backend clamps to `--max-ttl`, 5 min) |
-| Refuse unbound SSH logins | on | `--require-session-bind` |
-| Refuse unknown hosts | off (hosts are named when known) | `--require-known-host`, `--known-hosts` |
-| Key rotation / per-purpose keys | salt `phonekey/ssh-ed25519/v1` | `phonekeyd serve --salt` |
-| RP ID | page hostname | `--rp-id` |
-| Phone keys the agent offers | fetched from phonekeyd every 5 min | `phonekey-agent --keys FILE` |
-| Ed25519 implementation | WebCrypto if it passes RFC 8032 vectors; every WebCrypto signature is checked with noble and redone with noble if wrong | page *Diagnostics* |
-| Non-git signing data | refused | `--allow-unknown-kinds` |
-| Web session | 30 days | `--session-ttl` |
-| History retention | 7 days | `--retention` |
+```
+Host github.com
+  IdentityFile ~/.ssh/phonekey.pub
+  IdentitiesOnly yes
+```
 
-## Findings worth knowing
+**Switching between 1Password and the phone.** With `--upstream`, one agent
+offers both. Choose per tool by pointing the config above at a symlink, and
+switch it:
 
-- `jj git clone` makes two SSH logins (two notifications without a grant).
-- jj signs via stdin; `phonekey-keygen` exists only to make the content visible.
+```sh
+ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub   # desktop: 1Password approves
+ln -sfn ~/.ssh/phonekey.pub  ~/.ssh/active.pub   # mobile: phonekey approves
+```
+
+The symlink is global to the machine. For per-shell switching, git can take
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, and ssh expands
+environment variables in `IdentityFile`. jj has no per-key environment
+override; it needs a separate `JJ_CONFIG` or `--config`.
+
+## Using it
+
+- **Approving.** Each signature shows up as a card, with a notification. The
+  card shows what the signed bytes say (SSH login: user, server key; or a file
+  signature: namespace, hash). It also shows what the dev box says: the
+  command, the server name, the commit's subject, author, body and jj change
+  id. **Approve** asks for the passkey and signs. **Deny** fails the command on
+  the dev box.
+- **Approve + rest of "\<command\>".** Use this when one command signs several
+  times: `jj sign -r a..d`, `jj git push` with sign-on-push (each commit, then
+  the login), `git rebase -S`. The page keeps the key in memory and signs that
+  command's next requests by itself, listing each one in the banner. It stops
+  when:
+  - the window ends (30 s by default, *Grant length* setting, capped by the
+    server's `--max-grant`)
+  - the page is hidden
+  - you tap **End**
+
+  It isn't offered for an `ssh` or `ssh-keygen` started on its own, which signs
+  only once.
+- **Separate commands ask separately.** Three `git commit -S` runs in a row are
+  three approvals, because each is its own process. Commits made by jj and
+  signed when you push need one approval per push.
+- **Expiry.** A request expires after 90 s (`phonekey-agent --deadline`), and
+  the command then fails. Ctrl-C on the dev box withdraws it.
+- **Recent** lists the last signatures: who approved each (you or a grant), the
+  command, the dev box, and the full card details.
+- **Diagnostics** checks PRF and Ed25519 support, derives and shows the key
+  (should match on every device), and signs a test message. It prints a
+  snippet that verifies the signature with `ssh-keygen -Y verify`.
+
+## How it works
+
+```
+ git / jj / ssh ──SSH_AUTH_SOCK──▶ phonekey-agent ──HTTPS + token──▶ phonekeyd ──Web Push──▶ phone
+        ▲                          (dev box)        (long-poll)      (queue, page)              │
+        └──────── signature ◀──────────┘ ◀──────── signature ◀──────── page signs ◀── passkey PRF
+```
+
+### The key
+
+1. **PRF.** The page calls WebAuthn with the PRF extension and a fixed salt
+   (`phonekey/ssh-ed25519/v1`). After user verification, the authenticator
+   returns 32 bytes: an HMAC keyed by a secret that belongs to the passkey. The
+   same passkey and salt always give the same bytes, and only pages on the
+   passkey's domain can ask.
+2. **Seed.** HKDF-SHA-256 with info `phonekey ssh-ed25519 seed v1` turns them
+   into an ed25519 seed. `web/ed25519.js deriveSeed` does this, and
+   `internal/keyderive` is a Go mirror used by tests and the simulator. A test
+   pins both to the same output.
+3. **Signing.** The page imports the seed into WebCrypto Ed25519, or into the
+   vendored `noble-ed25519` when WebCrypto fails the RFC 8032 test vectors.
+   Every WebCrypto signature is also checked with noble and redone with noble
+   if it's wrong. Then the page signs and drops the key and the PRF output.
+4. **Unused passkey parts.** The passkey's own WebAuthn key pair is never used,
+   and assertions aren't verified. Only PRF matters.
+5. **Rotation.** Changing the salt (`phonekeyd serve --salt`) gives a new,
+   independent key from the same passkey.
+
+### Request flow
+
+1. ssh/git/jj ask the agent to sign `data` with the phone key. That's an SSH
+   userauth payload, or the SSHSIG blob `ssh-keygen -Y sign` builds.
+2. The agent works out context, then `POST /api/devbox/requests` with the key,
+   the data, the context and its deadline.
+3. phonekeyd parses the data (`internal/sshwire`) and refuses anything that's
+   neither userauth nor SSHSIG. It stores the request as `pending`, wakes the
+   page's event stream and sends a push.
+4. The page shows the request. On approval it signs `data` and posts the
+   signature. phonekeyd checks the signature against the registered key and
+   marks the request `signed`.
+5. The agent's long-poll (`GET /api/devbox/requests/{id}?wait=25`) returns the
+   signature, and the agent hands it to the client as a normal `ssh-ed25519`
+   signature.
+
+Requests end as `signed`, `denied`, `expired` (past the deadline) or
+`cancelled` (the client disconnected). A sweeper expires overdue requests and
+deletes resolved ones after `--retention` (7 days).
+
+### Code map
+
+| Path | Responsibility |
+| --- | --- |
+| `cmd/phonekeyd` | CLI: `serve` (including the tailnet listener), `pair-code`, `devbox add/list/rm`, `keys` |
+| `internal/server/server.go` | HTTP API, CSP and security headers, sessions, the event stream (SSE), long-polls, the push hold-back |
+| `internal/server/push.go` | VAPID keys (generated on first start and kept in the database), Web Push delivery, dropping dead subscriptions |
+| `internal/server/summary.go` | the one-line summary used for notifications and card titles |
+| `internal/store` | SQLite (`modernc.org/sqlite`, no cgo): keys, dev boxes, pairing codes, nonces, sessions, push subscriptions, requests |
+| `internal/sshwire` | parsing userauth payloads, SSHSIG blobs and `session-bind@openssh.com` |
+| `internal/protocol` | JSON types shared by the backend, the agent and the simulator |
+| `cmd/phonekey-agent`, `internal/agent/agent.go` | the ssh-agent: per-connection state, upstream proxying, deadline, cancel on disconnect, session-bind policy |
+| `internal/agent/context.go`, `proc_linux.go` | finding the requesting process (`SO_PEERCRED`, `/proc`), the scope, ssh destination and git action, reading git's commit file |
+| `internal/agent/knownhosts.go` | naming the server from known_hosts, including hashed entries |
+| `internal/agent/client.go` | the dev box API client |
+| `cmd/phonekey-keygen` | the jj shim |
+| `web/app.js` | the page: pairing, login, approvals, grants, push, Recent, diagnostics |
+| `web/ed25519.js`, `web/sshsig.js` | key derivation and signing; SSH wire encoding and SSHSIG armor |
+| `web/sw.js` | the service worker: shows a notification for every push, opens the request on click |
+| `web/vendor/noble-ed25519.js` | `@noble/ed25519` 3.2.0, unmodified (integrity hash in `web/vendor/README.md`) |
+| `internal/sim`, `cmd/phonekey-sim` | a stand-in phone that uses the web API with a key from a fixed secret |
+| `e2e/` | end-to-end tests (see [Development](#development)) |
+| `flake.nix` | the devshell, the package, and `nixosModules.default` |
+
+### Backend API
+
+- **Dev box API**, authenticated with `Authorization: Bearer <token>`:
+  - `POST /api/devbox/requests`
+  - `GET /api/devbox/requests/{id}?wait=N`
+  - `DELETE /api/devbox/requests/{id}`
+  - `GET /api/devbox/keys` (the registered keys, in authorized_keys format)
+
+  Each dev box has its own token. The backend stores only a hash of it. A dev
+  box can only poll or cancel its own requests.
+- **Web API**, authenticated with a session cookie:
+  - `config`
+  - `nonce`, `login`, `pair`, `logout`
+  - `requests`, `history`, `events` (SSE)
+  - `requests/{id}/signature`, `requests/{id}/deny`
+  - `push/subscribe`, `push/test`
+
+  All paths are under `/api/web/`.
+- **Logging in.** The page asks for a nonce and signs `phonekey-auth-v1\n<nonce>`
+  with the derived key. phonekeyd checks the signature against a registered key
+  and sets a 30-day `HttpOnly`, `SameSite=Strict` cookie. Listing requests
+  therefore needs no Face ID; signing always does.
+- **Pairing** registers a new key. It needs a one-time code from `pair-code`, or
+  an existing session.
+- **Cross-site requests.** State-changing web calls must come from the same
+  origin: `Sec-Fetch-Site: same-origin`, or a matching `Origin` header.
+- **Content security policy.** The page has a strict CSP: `script-src 'self'`,
+  no inline code, nothing from other origins.
+- **Push hold-back.** When a request comes from a command that had a signature
+  approved within `--max-grant`, its push waits 2 s. It's dropped if a grant
+  signed the request meanwhile, so auto-signed requests don't each notify.
+
+### Agent
+
+- **Per-connection state.** Each client connection gets its own state. That
+  holds the session bindings and an upstream connection, if any.
+- **Cancel on disconnect.** `x/crypto/ssh/agent.ServeAgent` doesn't read from
+  the socket while a request is being handled. The agent reads the socket
+  itself through a pipe, so a client that disconnects (Ctrl-C) cancels the
+  backend request.
+- **Session binding.** ssh sends `session-bind@openssh.com`, which the agent
+  verifies. The rules follow OpenSSH's ssh-agent:
+  - a userauth signature is only made for the most recent binding on the
+    connection
+  - never for a binding made only to forward the agent
+  - unbound sessions are refused unless `--require-session-bind=false`
+  - logins through a forwarded agent are marked as such
+
+  The bound host key is named from known_hosts. Hashed entries are matched
+  against the destination on ssh's command line.
+- **Context.** The requesting process comes from `SO_PEERCRED`, and its
+  ancestors from `/proc/<pid>/stat`.
+  - **Tool run and scope.** The agent takes the unbroken run of `ssh`,
+    `ssh-keygen`, `git`, `git-*`, `jj` and `phonekey-keygen` processes. The
+    topmost one (pid and start time) is the request's scope, which is what
+    grants match on. Only that run and its immediate parent are sent to the
+    backend.
+  - **ssh.** The destination and the git action ("push to stancl/foo") come
+    from ssh's arguments.
+  - **ssh-keygen.** The agent reads the file being signed. It uses the file
+    only if its hash matches the one in the SSHSIG blob, and then parses it as
+    a git commit or tag.
+  - **Linux only.** Process inspection is Linux-only. Elsewhere requests simply
+    carry less context.
+
+### Page
+
+- **No build step.** The page is plain ES modules with no framework and no
+  third-party code apart from the vendored noble. All DOM is built with a small
+  helper that only creates text nodes, never HTML strings.
+- **Live updates.** The page keeps an EventSource open. Browsers give up
+  reconnecting after an HTTP error such as a proxy's 502, so the page
+  reconnects by itself.
+- **Preselection.** A new request is preselected only if nothing else was
+  pending, or if it's the one whose notification you tapped. Something that
+  arrives while you're about to approve another request isn't swept into the
+  same approval.
+- **Grants** match on the scope and on the key, and only sign userauth or SSHSIG
+  data.
+
+## Threat model
+
+- **Trusted: the backend, including the page code it serves.** Whoever controls
+  the backend can serve a page that copies the key at your next approval. That's
+  the price of deriving an ordinary ed25519 key that GitHub accepts. So the
+  backend runs apart from the dev boxes, serves only its own files, and sends a
+  strict CSP. A stolen disk or backup of the backend holds no key material.
+- **Semi-trusted: the dev box.** Anything running as your user there can:
+  - read the agent's token
+  - send requests, which still need your approval
+  - lie in everything it reports: command, process, server name, commit
+    details, and the scope
+
+  So during an open grant it could pass a request off as part of the granted
+  command. It never gets key material. It can't get the page to sign a web
+  login, because phonekeyd only queues userauth and SSHSIG data and the page
+  refuses its own login format.
+
+  Checking commit details against the signed hash wouldn't help: an attacker on
+  the dev box writes the whole commit, message and change id included. What
+  protects you is approving only what you just triggered: the timing, the
+  command and the count.
+- **SSH logins.** Session binding limits signatures to real sessions with the
+  server the client verified. With `--require-known-host`, that server has to
+  be in known_hosts.
+- **Other websites** can't use the passkey (it's bound to the backend's domain)
+  or the web API (`SameSite=Strict` cookie, same-origin check).
+- **A lost phone** still needs Face ID or the passcode for the passkey. To
+  recover: remove the key from GitHub and from phonekeyd (`keys rm`), then pair
+  again.
+- **A stolen dev box token** can only queue requests, which you'd see and could
+  deny. To recover: `devbox rm`.
+- **Compared with 1Password's agent.** Both give one signature per approval and
+  never put the key on the dev box. phonekey shows what's being signed. It's
+  weaker in that the page's code can derive the key, while 1Password's key
+  never leaves 1Password.
+
+Not handled:
+- rate limits: `nonce` is unauthenticated, and every request sends a push
+- revoking sessions other than your own (logout)
+- an audit log beyond `--retention`
+- a client that half-closes its socket is treated as disconnected (OpenSSH
+  doesn't do this)
+
+## Development
+
+```sh
+nix develop                    # go (nixpkgs toolchain, GOTOOLCHAIN=local), openssh, git, jj, chromium
+go build -o bin/ ./cmd/...
+go test ./internal/...         # unit and in-process integration
+go test -tags e2e ./e2e        # needs docker and chromium
+nix build                      # the package
+```
+
+`e2e/` runs everything for real, with a temporary `HOME`, `GIT_CONFIG_GLOBAL`,
+`JJ_CONFIG` and explicit ssh options, so the host's own setup is never touched:
+
+- **`TestGit`, `TestJJ`, `TestCancelAndDeadline`** use OpenSSH, git and jj
+  against a throwaway sshd container (`e2e/sshd`), with the simulator approving.
+  They cover:
+  - clone, signed commit and tag, push and deny
+  - the shared scope of a 3-commit `git rebase -S`
+  - `jj git push` with sign-on-push: 2 signatures plus 1 login in one scope,
+    commit subjects and change ids through the shim, `jj log` reporting `good`
+  - cancelling with Ctrl-C, and the agent deadline
+- **`TestBrowser`** drives the real page in headless Chromium, with a virtual
+  authenticator that supports PRF:
+  - pairing, and the JS key derivation matching Go
+  - approving `ssh-keygen` signatures, and late arrivals not being preselected
+  - *Approve + rest* covering a rebase, and no grant offered for a one-shot
+  - Recent
+  - reconnecting after a 502
+  - the diagnostics signature verifying with OpenSSH, through WebCrypto and
+    through noble
+
+  `PHONEKEY_SCREENSHOTS=dir` saves phone-sized screenshots.
+
+To try the dev box side without a phone, `phonekey-sim` pairs with a key derived
+from `--secret` and approves (or asks y/N with `--ask`):
+
+```sh
+export PHONEKEY_DB=/tmp/phonekey.db
+bin/phonekeyd serve &
+bin/phonekey-sim pair "$(bin/phonekeyd pair-code)"
+PHONEKEY_TOKEN=$(bin/phonekeyd devbox add test) bin/phonekey-agent --backend http://127.0.0.1:8080 --socket /tmp/pk.sock &
+bin/phonekey-sim watch --ask
+```
+
+Things found while testing:
+- `jj git clone` logs in twice.
+- macOS Chrome doesn't display notifications that set `requireInteraction`
+  unless they're allowed as "alerts", so the service worker doesn't set it.
 - x/crypto's agent server logs refused signatures to stderr itself
-  (`agent 13: ...`), next to phonekey-agent's own log line.
-- Approving needs a fresh PRF evaluation, so listing requests uses a separate
-  long-lived session (established by signing a nonce with the derived key)
-  rather than asking for Face ID just to look.
-- phonekeyd refuses to queue data that isn't an SSH userauth payload or an
-  SSHSIG blob, and the page refuses to sign its own login message format, so a
-  dev box can't obtain a web-login signature.
+  (`agent 13: …`), next to phonekey-agent's own log line.
 
-Known gaps: `POST /api/web/nonce` is unauthenticated (one short-lived row per
-call) and request creation sends a push each time, neither rate-limited. The
-agent treats a client half-closing its socket as a disconnect; OpenSSH
-doesn't do that.
+## Open questions and future work
 
-Not done (M2/M3 in the brief): mode B (webauthn-sk signatures), NixOS modules,
-rate limits, a pairing flow that approves new keys from an existing device
-beyond "logged-in session may add keys".
+- **iOS.** PRF with iCloud Keychain and with 1Password inside the home-screen
+  app, Safari's Ed25519 (WebKit bug 262499; the noble fallback covers it if
+  needed), push reliability, and the same key on iPhone and Mac. Diagnostics is
+  built for checking these.
+- **GitHub.** How long it waits during an SSH login decides the agent's
+  `--deadline`. Not measured.
+- **Grants on desktop.** A grant ends when the page is hidden. On macOS, Chrome
+  may count a fully covered window as hidden. That costs a re-approval, nothing
+  worse. If it's annoying, end grants on hide only on mobile.
+- **Grant scope.** Process tree only. A "whole dev box" option would cover
+  several separate commands in a row, at the cost of auto-signing anything from
+  that box during the window.
+- **Showing a range before approving.** For `jj sign -r X` the agent could list
+  the commits in `X` up front. That's command-specific, and still unverified
+  context.
+- **Checkboxes or per-card buttons.** Multi-select only helps when unrelated
+  requests are pending at once. Per-card buttons would be simpler.
+- **Upstream order.** `--upstream-first`, to offer 1Password's keys before the
+  phone key.
+- **Hardening.** Rate limits, a session list with revocation, keeping history
+  beyond `--retention`.
+- **Mode B from the brief.** `webauthn-sk-ecdsa` signatures straight from the
+  passkey, so not even the page holds a key. It works with OpenSSH servers but
+  not GitHub.
+- **An agent module.** NixOS or home-manager, for the dev box side.
