@@ -246,6 +246,7 @@ e.g. in nushell's `config.nu`:
 
 ```nu
 alias mobile = phonekey-use phone
+alias phone = phonekey-use phone
 alias desktop = phonekey-use desktop
 ```
 
