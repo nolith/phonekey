@@ -27,10 +27,6 @@ import (
 )
 
 type Config struct {
-	// RPID overrides the WebAuthn relying party id. Empty means the page's
-	// hostname. The derived key is bound to it: changing it later means a
-	// new passkey and new GitHub keys.
-	RPID   string
 	RPName string
 	// Salt is the PRF salt. Bump the version suffix to rotate keys without a
 	// new passkey.
@@ -505,7 +501,6 @@ func (s *Server) setSession(w http.ResponseWriter, r *http.Request, keyID int64)
 
 func (s *Server) webConfig(w http.ResponseWriter, r *http.Request) {
 	c := protocol.WebConfig{
-		RPID:            s.cfg.RPID,
 		RPName:          s.cfg.RPName,
 		Salt:            s.cfg.Salt,
 		HKDFInfo:        keyderive.HKDFInfo,

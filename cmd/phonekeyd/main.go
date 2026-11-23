@@ -86,7 +86,6 @@ func serve(ctx context.Context, st *store.Store, dbPath string, args []string) e
 	tsKeyFile := fs.String("tailscale-authkey-file", os.Getenv("PHONEKEY_TS_AUTHKEY_FILE"),
 		"Tailscale auth key for the first login; without one (or $TS_AUTHKEY) a login URL is logged ($PHONEKEY_TS_AUTHKEY_FILE)")
 	var cfg server.Config
-	fs.StringVar(&cfg.RPID, "rp-id", os.Getenv("PHONEKEY_RP_ID"), "WebAuthn RP ID (default: the page's hostname) ($PHONEKEY_RP_ID)")
 	fs.StringVar(&cfg.RPName, "rp-name", "phonekey", "WebAuthn RP display name")
 	fs.StringVar(&cfg.Salt, "salt", "", "PRF salt (default phonekey/ssh-ed25519/v1)")
 	fs.StringVar(&cfg.VAPIDSubject, "vapid-subject", os.Getenv("PHONEKEY_VAPID_SUBJECT"),

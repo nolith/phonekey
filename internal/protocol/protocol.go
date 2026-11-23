@@ -180,7 +180,6 @@ type WebKey struct {
 
 // WebConfig is what the page needs before it can do anything.
 type WebConfig struct {
-	RPID            string   `json:"rp_id,omitempty"` // empty: the page's hostname
 	RPName          string   `json:"rp_name"`
 	Salt            string   `json:"salt"`
 	HKDFInfo        string   `json:"hkdf_info"`

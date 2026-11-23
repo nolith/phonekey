@@ -212,7 +212,6 @@ modules = [
   - In the built-in mode the name stays the same wherever the backend runs, as
     long as the node state moves along.
   - With the host's Tailscale, the hostname is the host's.
-  - `--rp-id` can bind passkeys to a parent domain instead.
 - **VAPID subject.** Push services need a contact: a `mailto:` address or an
   `https:` URL (the backend's own URL works). Apple's push service rejects some
   placeholders.

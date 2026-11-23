@@ -81,8 +81,10 @@ async function api(method, path, body) {
 
 // Passkey + PRF
 
+// Passkeys are bound to this exact hostname. A parent domain would let any
+// site under it (e.g. another machine on the tailnet) use the same passkey.
 function rpId() {
-  return state.config.rp_id || location.hostname;
+  return location.hostname;
 }
 
 function salt() {
