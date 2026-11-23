@@ -265,7 +265,8 @@
                   # the tailnet's control and relay servers are on the internet.
                   # (tsnet's own tailnet traffic is userspace and needs ACLs.)
                   IPAddressDeny = [ "localhost" "link-local" "multicast" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "fc00::/7" ];
-                  IPAddressAllow = [ "127.0.0.53" "100.100.100.100" ] ++ config.networking.nameservers ++ i.ipAddressAllow;
+                  # systemd-resolved's stub, and Tailscale's MagicDNS (IPv4, IPv6).
+                  IPAddressAllow = [ "127.0.0.53" "100.100.100.100" "fd7a:115c:a1e0::53" ] ++ config.networking.nameservers ++ i.ipAddressAllow;
                 };
               };
               "${user name}-serve" = lib.mkIf (i.serve.httpsPort != null) {

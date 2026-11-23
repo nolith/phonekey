@@ -180,7 +180,8 @@ modules = [
   - runs under a syscall filter, with no access to the host's tailscaled or
     D-Bus sockets, and limits on memory and tasks
   - can't reach localhost, link-local, private or tailnet addresses, except
-    DNS resolvers (systemd-resolved, MagicDNS, `networking.nameservers`). If
+    DNS resolvers (systemd-resolved, MagicDNS over IPv4 and IPv6,
+    `networking.nameservers`). If
     your resolver comes from DHCP on a private network, add it to
     `ipAddressAllow`. With a TCP `address`, this network restriction is left
     out so connections can come in.
