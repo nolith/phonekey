@@ -110,7 +110,7 @@ phonekey.nixosModules.phonekey-agent
       desktop = { sign = "~/.ssh/op-github.pub"; auth = "~/.ssh/op-github_auth.pub"; };
     };
     # Hosts ssh reaches through the agent (the default).
-    ssh.hosts = [ "github.com" ];
+    # ssh.hosts = [ "github.com" ];
   };
 }
 ```
