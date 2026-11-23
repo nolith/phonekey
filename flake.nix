@@ -17,7 +17,7 @@
             root = ./.;
             fileset = pkgs.lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./web ];
           };
-          vendorHash = "sha256-7VE/BHXDediVq65NruZh9wLjBaO+lGmxtdEfkG3qQZs=";
+          vendorHash = "sha256-jR72jh6BY9G5zVY1s5pPlv+4xiUprdBn16HwSipkv/Q=";
           subPackages = [ "cmd/phonekeyd" "cmd/phonekey-agent" "cmd/phonekey-keygen" "cmd/phonekey-sim" ];
           env.CGO_ENABLED = "0";
           ldflags = [ "-s" "-w" ];

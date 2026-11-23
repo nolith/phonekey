@@ -19,6 +19,7 @@ Chrome has been used by hand. iOS hasn't been tried yet.
 - [Using it](#using-it)
 - [How it works](#how-it-works)
 - [Threat model](#threat-model)
+- [Dependencies](#dependencies)
 - [Development](#development)
 - [Open questions and future work](#open-questions-and-future-work)
 
@@ -475,6 +476,62 @@ Not handled:
 - an audit log beyond `--retention`
 - a client that half-closes its socket is treated as disconnected (OpenSSH
   doesn't do this)
+
+## Dependencies
+
+Everything outside the Go standard library, by where it runs.
+
+**The page** (where the key lives):
+
+| Dependency | Used for |
+| --- | --- |
+| `@noble/ed25519` 3.2.0, vendored as `web/vendor/noble-ed25519.js` | always: computing the public key and checking every WebCrypto signature; signing when WebCrypto fails the RFC 8032 vectors |
+
+It's a single file with no dependencies of its own. It's unmodified from npm, and
+its integrity hash is in `web/vendor/README.md`. Nothing else runs in the page:
+the CSP blocks other origins.
+
+**phonekey-agent** (dev box):
+
+| Dependency | Used for |
+| --- | --- |
+| `golang.org/x/crypto` | `ssh`, `ssh/agent`: the agent protocol, key and signature parsing |
+| `golang.org/x/sys` | `SO_PEERCRED` |
+
+phonekey-keygen uses only the standard library.
+
+**phonekeyd** (backend):
+
+| Dependency | Used for | Pulls in |
+| --- | --- | --- |
+| `golang.org/x/crypto`, `golang.org/x/sys` | SSH key and signature parsing | |
+| `modernc.org/sqlite` | the database; SQLite translated to pure Go (no cgo) | `modernc.org/libc`, `mathutil`, `memory`; `remyoudompheng/bigfft`, `dustin/go-humanize`, `google/uuid` |
+| `github.com/SherClockHolmes/webpush-go` | Web Push: payload encryption (RFC 8291) and VAPID tokens | `golang-jwt/jwt/v5` |
+| `tailscale.com` (`tsnet`) | only for `--tailscale-hostname` | about 35 more modules: `wireguard-go`, gVisor's netstack, `x/net`, `klauspost/compress`, … |
+
+Without `tsnet`, phonekeyd builds from 11 modules; with it, from 45. `go version -m
+bin/phonekeyd` lists them.
+
+**Tests only**, not in any binary: `chromedp/chromedp` and `chromedp/cdproto`, which
+drive Chromium.
+
+**Pinning.**
+- `go.sum` pins every module's hash, and `vendorHash` in `flake.nix` pins the
+  whole vendored set for the Nix build.
+- `tailscale.com` is held at v1.104.6, the newest release that builds with
+  nixpkgs' Go 1.27.3.
+- `govulncheck ./...` (2026-11-22) reports one issue, in the standard library:
+  GO-2026-6859, an `net/http` server crash. It's fixed in Go 1.27.4, which
+  nixpkgs doesn't have yet. Anyone who can reach phonekeyd (the tailnet,
+  localhost) could crash it, and the NixOS service restarts after a crash.
+- `klauspost/compress` and `golang-jwt/jwt/v5` were bumped past their advisories.
+
+**Trimming options.**
+- **`tsnet` behind a build tag**, for deployments that sit behind
+  `tailscale serve`: removes ~35 modules from those builds.
+- **A built-in Web Push implementation** instead of `webpush-go`: about 150
+  lines on the standard library's ECDH, HKDF, AES-GCM and ECDSA, which also
+  drops `golang-jwt`.
 
 ## Development
 
