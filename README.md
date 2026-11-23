@@ -1,5 +1,25 @@
 # phonekey
 
+> [!CAUTION]
+> This code was almost entirely written by an LLM (Claude), and reviewed by
+> another LLM pass, not by a human security reviewer. Before trusting it with
+> keys that matter, read the parts that decide whether the key can leak and what
+> gets signed, under 1,000 lines:
+>
+> 1. **`web/app.js`:** `keyFromPRF`, `unlock`, `approval`, `signable`,
+>    `signRequest`, `approve`, the grant functions (`startGrant`, `endGrant`,
+>    `runGrant`), and how request details are rendered (`h`, `renderDetails`,
+>    `renderContext`).
+> 2. **`web/ed25519.js` and `web/sshsig.js`:** key derivation, signing, and
+>    the SSH wire encoding.
+> 3. **The top of `internal/server/server.go`:**
+>    - the routes, static file serving and the CSP
+>    - the `sameOrigin` and `session` wrappers, and `checkApproval`
+>    - `createRequest`, `submitSignature`, `pair` and `removeKey`
+>
+> If you deploy with the NixOS module, also check the `sandbox` settings in
+> `flake.nix`.
+
 Approve SSH logins and commit signatures with a passkey, on your phone or in a
 desktop browser.
 
@@ -10,8 +30,7 @@ being signed, approve with Face ID, and the page derives an ordinary
 private key is stored anywhere: not on the dev box, not on the backend, not in a
 vault.
 
-Status: proof of concept. The design brief is at
-<https://claude.ai/artifact/U11KvJataYt3YFH1ncZSKN>.
+Tested so far:
 
 - **Automated:** the dev box side, the backend and the page are tested end to
   end (see [Development](#development)).
@@ -798,7 +817,7 @@ Things found while testing:
   phone key.
 - **Hardening.** Rate limits, a session list with revocation, keeping history
   beyond `--retention`.
-- **Mode B from the brief.** `webauthn-sk-ecdsa` signatures straight from the
+- **Passkey-native signatures.** `webauthn-sk-ecdsa` signatures straight from the
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
 - **An agent module.** NixOS or home-manager, for the dev box side.
