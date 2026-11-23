@@ -1,0 +1,11 @@
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+AuthorizedKeysFile /etc/ssh/authorized_keys/%u
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PermitRootLogin no
+# The bind-mounted key file is owned by the host user.
+StrictModes no
+LogLevel VERBOSE
+# Tests deliberately fail and abort logins; don't lock the host out for it.
+PerSourcePenalties no

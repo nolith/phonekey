@@ -1,0 +1,764 @@
+// Package server implements phonekeyd: the request queue, the dev box and
+// web APIs, push delivery and the embedded approval web app.
+package server
+
+import (
+	"context"
+	"crypto/ed25519"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/ssh"
+
+	"phonekey/internal/keyderive"
+	"phonekey/internal/protocol"
+	"phonekey/internal/sshwire"
+	"phonekey/internal/store"
+	"phonekey/web"
+)
+
+type Config struct {
+	// RPID overrides the WebAuthn relying party id. Empty means the page's
+	// hostname. The derived key is bound to it: changing it later means a
+	// new passkey and new GitHub keys.
+	RPID   string
+	RPName string
+	// Salt is the PRF salt. Bump the version suffix to rotate keys without a
+	// new passkey.
+	Salt         string
+	VAPIDSubject string
+
+	DefaultTTL time.Duration
+	MaxTTL     time.Duration
+	SessionTTL time.Duration
+	Retention  time.Duration
+	MaxGrant   time.Duration
+
+	// AllowUnknownKinds lets dev boxes queue data that's neither an SSH
+	// userauth payload nor an SSHSIG blob.
+	AllowUnknownKinds bool
+
+	// Origins are extra origins accepted for state-changing web API calls
+	// from browsers that don't send Sec-Fetch-Site.
+	Origins []string
+
+	PushClient *http.Client
+	Logger     *slog.Logger
+}
+
+func (c *Config) defaults() {
+	if c.RPName == "" {
+		c.RPName = "phonekey"
+	}
+	if c.Salt == "" {
+		c.Salt = keyderive.DefaultSalt
+	}
+	if c.VAPIDSubject == "" {
+		c.VAPIDSubject = "mailto:phonekey@example.com"
+	}
+	if c.DefaultTTL == 0 {
+		c.DefaultTTL = 90 * time.Second
+	}
+	if c.MaxTTL == 0 {
+		c.MaxTTL = 5 * time.Minute
+	}
+	if c.SessionTTL == 0 {
+		c.SessionTTL = 30 * 24 * time.Hour
+	}
+	if c.Retention == 0 {
+		c.Retention = 7 * 24 * time.Hour
+	}
+	if c.PushClient == nil {
+		c.PushClient = &http.Client{Timeout: 20 * time.Second}
+	}
+	if c.Logger == nil {
+		c.Logger = slog.Default()
+	}
+}
+
+type Server struct {
+	cfg    Config
+	store  *store.Store
+	log    *slog.Logger
+	push   *pusher
+	vapid  string
+	events *broker
+	mux    *http.ServeMux
+}
+
+// broker wakes long-polls and event streams whenever any request changes.
+type broker struct {
+	mu sync.Mutex
+	ch chan struct{}
+}
+
+func (b *broker) wait() <-chan struct{} {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ch == nil {
+		b.ch = make(chan struct{})
+	}
+	return b.ch
+}
+
+func (b *broker) notify() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ch != nil {
+		close(b.ch)
+		b.ch = nil
+	}
+}
+
+func New(ctx context.Context, st *store.Store, cfg Config) (*Server, error) {
+	cfg.defaults()
+	pub, priv, err := loadVAPID(ctx, st)
+	if err != nil {
+		return nil, fmt.Errorf("vapid keys: %w", err)
+	}
+	s := &Server{
+		cfg:    cfg,
+		store:  st,
+		log:    cfg.Logger,
+		vapid:  pub,
+		events: &broker{},
+		mux:    http.NewServeMux(),
+		push: &pusher{
+			store: st, log: cfg.Logger, subject: cfg.VAPIDSubject,
+			public: pub, private: priv, client: cfg.PushClient,
+		},
+	}
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) routes() {
+	m := s.mux
+	m.HandleFunc("POST /api/devbox/requests", s.devbox(s.createRequest))
+	m.HandleFunc("GET /api/devbox/requests/{id}", s.devbox(s.pollRequest))
+	m.HandleFunc("DELETE /api/devbox/requests/{id}", s.devbox(s.cancelRequest))
+	m.HandleFunc("GET /api/devbox/keys", s.devbox(s.devboxKeys))
+
+	m.HandleFunc("GET /api/web/config", s.webConfig)
+	m.HandleFunc("POST /api/web/nonce", s.sameOrigin(s.nonce))
+	m.HandleFunc("POST /api/web/login", s.sameOrigin(s.login))
+	m.HandleFunc("POST /api/web/pair", s.sameOrigin(s.pair))
+	m.HandleFunc("POST /api/web/logout", s.sameOrigin(s.logout))
+	m.HandleFunc("GET /api/web/requests", s.session(s.listRequests))
+	m.HandleFunc("GET /api/web/history", s.session(s.history))
+	m.HandleFunc("GET /api/web/events", s.session(s.eventStream))
+	m.HandleFunc("POST /api/web/requests/{id}/signature", s.sameOrigin(s.session(s.submitSignature)))
+	m.HandleFunc("POST /api/web/requests/{id}/deny", s.sameOrigin(s.session(s.denyRequest)))
+	m.HandleFunc("POST /api/web/push/subscribe", s.sameOrigin(s.session(s.subscribe)))
+	m.HandleFunc("POST /api/web/push/test", s.sameOrigin(s.session(s.testPush)))
+
+	static, _ := fs.Sub(web.FS, ".")
+	files := http.FileServerFS(static)
+	m.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".webmanifest") {
+			w.Header().Set("Content-Type", "application/manifest+json")
+		}
+		w.Header().Set("Cache-Control", "no-cache")
+		files.ServeHTTP(w, r)
+	})
+}
+
+const csp = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; " +
+	"connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("Content-Security-Policy", csp)
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("Cross-Origin-Opener-Policy", "same-origin")
+	s.mux.ServeHTTP(w, r)
+}
+
+// Sweep runs the expiry sweeper until ctx is done.
+func (s *Server) Sweep(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			changed, err := s.store.Sweep(ctx, s.cfg.Retention)
+			if err != nil {
+				s.log.Error("sweep", "err", err)
+			}
+			if changed {
+				s.events.notify()
+			}
+		}
+	}
+}
+
+// Helpers
+
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e httpError) Error() string { return e.msg }
+
+func errorf(code int, format string, args ...any) error {
+	return httpError{code, fmt.Sprintf(format, args...)}
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+	var he httpError
+	switch {
+	case errors.As(err, &he):
+	case errors.Is(err, store.ErrNotFound):
+		he = httpError{http.StatusNotFound, "not found"}
+	case errors.Is(err, store.ErrNotPending):
+		he = httpError{http.StatusConflict, "request is no longer pending"}
+	default:
+		s.log.Error("request failed", "path", r.URL.Path, "err", err)
+		he = httpError{http.StatusInternalServerError, "internal error"}
+	}
+	writeJSON(w, he.code, map[string]string{"error": he.msg})
+}
+
+func decode(r *http.Request, v any) error {
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return errorf(http.StatusBadRequest, "bad json: %v", err)
+	}
+	return nil
+}
+
+func parseEd25519(authorized string) (ssh.PublicKey, ed25519.PublicKey, error) {
+	k, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorized))
+	if err != nil {
+		return nil, nil, errorf(http.StatusBadRequest, "bad public key: %v", err)
+	}
+	ck, ok := k.(ssh.CryptoPublicKey)
+	if !ok || k.Type() != ssh.KeyAlgoED25519 {
+		return nil, nil, errorf(http.StatusBadRequest, "only ssh-ed25519 keys are supported")
+	}
+	return k, ck.CryptoPublicKey().(ed25519.PublicKey), nil
+}
+
+// normalizeKey drops any comment from an authorized_keys line.
+func normalizeKey(k ssh.PublicKey) string {
+	b := ssh.MarshalAuthorizedKey(k)
+	return strings.TrimSpace(string(b))
+}
+
+// Dev box API
+
+func (s *Server) devbox(h func(http.ResponseWriter, *http.Request, *store.Devbox)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok {
+			s.fail(w, r, errorf(http.StatusUnauthorized, "missing bearer token"))
+			return
+		}
+		d, err := s.store.DevboxByToken(r.Context(), token)
+		if errors.Is(err, store.ErrNotFound) {
+			s.fail(w, r, errorf(http.StatusUnauthorized, "unknown dev box token"))
+			return
+		} else if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		h(w, r, d)
+	}
+}
+
+func (s *Server) createRequest(w http.ResponseWriter, r *http.Request, d *store.Devbox) {
+	var req protocol.CreateRequest
+	if err := decode(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	k, _, err := parseEd25519(req.PublicKey)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	pk := normalizeKey(k)
+	if _, err := s.store.KeyByPublicKey(r.Context(), pk); errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, errorf(http.StatusBadRequest, "key %s is not registered", ssh.FingerprintSHA256(k)))
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	details := sshwire.Parse(req.Data)
+	if details.Kind == sshwire.KindUnknown && !s.cfg.AllowUnknownKinds {
+		s.fail(w, r, errorf(http.StatusBadRequest, "data is neither an SSH userauth request nor an SSHSIG blob"))
+		return
+	}
+	if details.Kind == sshwire.KindUserauth && details.KeyFingerprint != ssh.FingerprintSHA256(k) {
+		s.fail(w, r, errorf(http.StatusBadRequest, "userauth request is for a different key"))
+		return
+	}
+	ttl := s.cfg.DefaultTTL
+	if req.TTLSeconds > 0 {
+		ttl = min(time.Duration(req.TTLSeconds)*time.Second, s.cfg.MaxTTL)
+	}
+	// Round up: expiry is stored in whole seconds and mustn't come before
+	// the agent's own deadline.
+	expires := time.Now().Add(ttl).Truncate(time.Second).Add(time.Second)
+	summary := summarize(details, req.Context)
+	id, err := s.store.CreateRequest(r.Context(), store.NewRequest{
+		DevboxID:    d.ID,
+		PublicKey:   pk,
+		Fingerprint: ssh.FingerprintSHA256(k),
+		Data:        req.Data,
+		Details:     details,
+		Context:     req.Context,
+		Summary:     summary,
+		ExpiresAt:   expires,
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("request created", "id", id, "devbox", d.Name, "kind", details.Kind, "summary", summary)
+	s.events.notify()
+	go s.push.send(context.WithoutCancel(r.Context()), PushMessage{ID: id, Title: d.Name, Body: summary})
+	writeJSON(w, http.StatusCreated, protocol.CreateResponse{ID: id, ExpiresAt: expires.Unix()})
+}
+
+func effectiveStatus(r *store.Request) string {
+	if r.Status == protocol.StatusPending && r.ExpiresAt <= time.Now().Unix() {
+		return protocol.StatusExpired
+	}
+	return r.Status
+}
+
+func (s *Server) pollRequest(w http.ResponseWriter, r *http.Request, d *store.Devbox) {
+	id := r.PathValue("id")
+	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
+	deadline := time.After(time.Duration(min(max(wait, 0), 60)) * time.Second)
+	for {
+		changed := s.events.wait()
+		req, err := s.store.Request(r.Context(), id)
+		if err == nil && req.DevboxID != d.ID {
+			err = store.ErrNotFound
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		status := effectiveStatus(req)
+		if status != protocol.StatusPending {
+			writeJSON(w, http.StatusOK, protocol.RequestState{ID: id, Status: status, Signature: req.Signature})
+			return
+		}
+		expiry := time.Until(time.Unix(req.ExpiresAt, 0)) + 100*time.Millisecond
+		select {
+		case <-changed:
+		case <-time.After(expiry):
+		case <-deadline:
+			writeJSON(w, http.StatusOK, protocol.RequestState{ID: id, Status: status})
+			return
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) cancelRequest(w http.ResponseWriter, r *http.Request, d *store.Devbox) {
+	id := r.PathValue("id")
+	req, err := s.store.Request(r.Context(), id)
+	if err == nil && req.DevboxID != d.ID {
+		err = store.ErrNotFound
+	}
+	if err == nil {
+		err = s.store.Resolve(r.Context(), id, protocol.StatusCancelled, nil, false)
+	}
+	if err != nil && !errors.Is(err, store.ErrNotPending) {
+		s.fail(w, r, err)
+		return
+	}
+	s.events.notify()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) devboxKeys(w http.ResponseWriter, r *http.Request, d *store.Devbox) {
+	keys, err := s.store.Keys(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	for _, k := range keys {
+		fmt.Fprintf(w, "%s %s\n", k.PublicKey, strings.Join(strings.Fields(k.Label), "_"))
+	}
+}
+
+// Web API
+
+const sessionCookie = "phonekey_session"
+
+// sameOrigin rejects cross-site state-changing requests. Browsers that send
+// Sec-Fetch-Site are trusted on it; otherwise the Origin header must match.
+func (s *Server) sameOrigin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if site := r.Header.Get("Sec-Fetch-Site"); site != "" {
+			if site != "same-origin" {
+				s.fail(w, r, errorf(http.StatusForbidden, "cross-site request"))
+				return
+			}
+			h(w, r)
+			return
+		}
+		origin := r.Header.Get("Origin")
+		u, err := url.Parse(origin)
+		if origin == "" || err != nil {
+			s.fail(w, r, errorf(http.StatusForbidden, "missing origin"))
+			return
+		}
+		ok := u.Host == r.Host || (r.Header.Get("X-Forwarded-Host") != "" && u.Host == r.Header.Get("X-Forwarded-Host"))
+		for _, o := range s.cfg.Origins {
+			ok = ok || o == origin
+		}
+		if !ok {
+			s.fail(w, r, errorf(http.StatusForbidden, "origin %s not allowed", origin))
+			return
+		}
+		h(w, r)
+	}
+}
+
+type keyIDCtx struct{}
+
+func (s *Server) sessionKeyID(r *http.Request) (int64, bool) {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return 0, false
+	}
+	id, err := s.store.SessionKey(r.Context(), c.Value)
+	return id, err == nil
+}
+
+func (s *Server) session(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		id, ok := s.sessionKeyID(r)
+		if !ok {
+			s.fail(w, r, errorf(http.StatusUnauthorized, "not logged in"))
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), keyIDCtx{}, id)))
+	}
+}
+
+func (s *Server) setSession(w http.ResponseWriter, r *http.Request, keyID int64) error {
+	token, err := s.store.NewSession(r.Context(), keyID, s.cfg.SessionTTL)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: token, Path: "/",
+		MaxAge: int(s.cfg.SessionTTL.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+	})
+	return nil
+}
+
+func (s *Server) webConfig(w http.ResponseWriter, r *http.Request) {
+	c := protocol.WebConfig{
+		RPID:            s.cfg.RPID,
+		RPName:          s.cfg.RPName,
+		Salt:            s.cfg.Salt,
+		HKDFInfo:        keyderive.HKDFInfo,
+		VAPIDPublicKey:  s.vapid,
+		MaxGrantSeconds: int(s.cfg.MaxGrant.Seconds()),
+	}
+	if _, ok := s.sessionKeyID(r); ok {
+		c.LoggedIn = true
+		keys, err := s.store.Keys(r.Context())
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		c.Keys = keys
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+func (s *Server) nonce(w http.ResponseWriter, r *http.Request) {
+	n, err := s.store.NewNonce(r.Context(), 5*time.Minute)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, protocol.NonceResponse{Nonce: n})
+}
+
+// checkAuth verifies a nonce signature and returns the normalized key.
+func (s *Server) checkAuth(r *http.Request, publicKey, nonce string, sig []byte) (ssh.PublicKey, error) {
+	k, pub, err := parseEd25519(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ed25519.Verify(pub, protocol.AuthMessage(nonce), sig) {
+		return nil, errorf(http.StatusUnauthorized, "signature does not verify")
+	}
+	ok, err := s.store.ConsumeNonce(r.Context(), nonce)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errorf(http.StatusUnauthorized, "nonce expired or already used")
+	}
+	return k, nil
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var req protocol.LoginRequest
+	if err := decode(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	k, err := s.checkAuth(r, req.PublicKey, req.Nonce, req.Signature)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	key, err := s.store.KeyByPublicKey(r.Context(), normalizeKey(k))
+	if errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, errorf(http.StatusUnauthorized, "key %s is not registered; pair it first", ssh.FingerprintSHA256(k)))
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.setSession(w, r, key.ID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, key)
+}
+
+func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
+	var req protocol.PairRequest
+	if err := decode(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	k, err := s.checkAuth(r, req.PublicKey, req.Nonce, req.Signature)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// A logged-in session may add keys (e.g. a second passkey provider);
+	// otherwise a one-time code from `phonekeyd pair-code` is required.
+	if _, ok := s.sessionKeyID(r); !ok {
+		ok, err := s.store.ConsumePairCode(r.Context(), req.Code)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if !ok {
+			s.fail(w, r, errorf(http.StatusUnauthorized, "invalid or expired pairing code"))
+			return
+		}
+	}
+	label := strings.Join(strings.Fields(req.Label), " ")
+	if label == "" {
+		label = "passkey"
+	}
+	id, err := s.store.AddKey(r.Context(), normalizeKey(k), ssh.FingerprintSHA256(k), label, req.CredentialID)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("key paired", "fingerprint", ssh.FingerprintSHA256(k), "label", label)
+	if err := s.setSession(w, r, id); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	key, _ := s.store.KeyByPublicKey(r.Context(), normalizeKey(k))
+	writeJSON(w, http.StatusOK, key)
+}
+
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(sessionCookie); err == nil {
+		s.store.DeleteSession(r.Context(), c.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) pending(ctx context.Context) ([]protocol.WebRequest, error) {
+	reqs, err := s.store.PendingRequests(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]protocol.WebRequest, 0, len(reqs))
+	for _, r := range reqs {
+		out = append(out, r.WebRequest)
+	}
+	return out, nil
+}
+
+func (s *Server) listRequests(w http.ResponseWriter, r *http.Request) {
+	reqs, err := s.pending(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, reqs)
+}
+
+func (s *Server) history(w http.ResponseWriter, r *http.Request) {
+	reqs, err := s.store.History(r.Context(), 50)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	type item struct {
+		protocol.WebRequest
+		ViaGrant bool `json:"via_grant"`
+	}
+	out := make([]item, 0, len(reqs))
+	for _, q := range reqs {
+		q.Data = nil
+		out = append(out, item{q.WebRequest, q.ViaGrant})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// eventStream pushes the pending list over server-sent events whenever it
+// changes. Grants on the page depend on this live connection.
+func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		s.fail(w, r, errors.New("streaming unsupported"))
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	heartbeat := time.NewTicker(20 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		changed := s.events.wait()
+		reqs, err := s.pending(r.Context())
+		if err != nil {
+			return
+		}
+		b, _ := json.Marshal(reqs)
+		fmt.Fprintf(w, "event: requests\ndata: %s\n\n", b)
+		flusher.Flush()
+		// Wake up when the earliest request expires so the page drops it.
+		var expiry <-chan time.Time
+		if len(reqs) > 0 {
+			soonest := reqs[0].ExpiresAt
+			for _, q := range reqs {
+				soonest = min(soonest, q.ExpiresAt)
+			}
+			expiry = time.After(time.Until(time.Unix(soonest, 0)) + 100*time.Millisecond)
+		}
+	wait:
+		select {
+		case <-changed:
+		case <-expiry:
+		case <-heartbeat.C:
+			fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
+			goto wait
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (s *Server) submitSignature(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var sub protocol.SignatureSubmission
+	if err := decode(r, &sub); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	req, err := s.store.Request(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	_, pub, err := parseEd25519(req.PublicKey)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if !ed25519.Verify(pub, req.Data, sub.Signature) {
+		s.fail(w, r, errorf(http.StatusBadRequest, "signature does not verify against %s", req.Fingerprint))
+		return
+	}
+	if err := s.store.Resolve(r.Context(), id, protocol.StatusSigned, sub.Signature, sub.Grant); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("request signed", "id", id, "grant", sub.Grant)
+	s.events.notify()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) denyRequest(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.store.Resolve(r.Context(), id, protocol.StatusDenied, nil, false); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("request denied", "id", id)
+	s.events.notify()
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
+	var sub struct {
+		Endpoint string `json:"endpoint"`
+		Keys     struct {
+			P256dh string `json:"p256dh"`
+			Auth   string `json:"auth"`
+		} `json:"keys"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	var raw json.RawMessage
+	if err := decode(r, &raw); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := json.Unmarshal(raw, &sub); err != nil || sub.Endpoint == "" || sub.Keys.P256dh == "" || sub.Keys.Auth == "" {
+		s.fail(w, r, errorf(http.StatusBadRequest, "not a push subscription"))
+		return
+	}
+	if u, err := url.Parse(sub.Endpoint); err != nil || u.Scheme != "https" {
+		s.fail(w, r, errorf(http.StatusBadRequest, "push endpoint must be https"))
+		return
+	}
+	keyID := r.Context().Value(keyIDCtx{}).(int64)
+	if err := s.store.SavePushSubscription(r.Context(), sub.Endpoint, string(raw), keyID); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("push subscription saved", "endpoint", sub.Endpoint)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) testPush(w http.ResponseWriter, r *http.Request) {
+	go s.push.send(context.WithoutCancel(r.Context()), PushMessage{Title: "phonekey", Body: "Test notification"})
+	w.WriteHeader(http.StatusAccepted)
+}

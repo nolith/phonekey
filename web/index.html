@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>phonekey</title>
+  <meta name="theme-color" content="#19705a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="phonekey">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <h1>phonekey</h1>
+    <span id="status" class="status"></span>
+  </header>
+
+  <main>
+    <p id="error" class="error" role="alert" hidden></p>
+
+    <section id="grant" class="grant" hidden>
+      <div>
+        <strong>Grant open</strong>
+        <span id="grant-info"></span>
+      </div>
+      <button id="grant-end" class="secondary">End</button>
+    </section>
+
+    <section id="pair" hidden>
+      <h2>Pair a passkey</h2>
+      <p>Run <code>phonekeyd pair-code</code> on the backend host and enter the code. Pairing creates a passkey for this site,
+        derives an SSH key from it and registers the public key.</p>
+      <label>Pairing code <input id="pair-code" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <label>Label <input id="pair-label" placeholder="iPhone (iCloud Keychain)"></label>
+      <div class="row">
+        <button id="pair-create">Create passkey</button>
+        <button id="pair-existing" class="secondary">Use an existing passkey</button>
+      </div>
+      <hr>
+      <p>Already paired on another device or browser?</p>
+      <button id="login" class="secondary">Log in with passkey</button>
+    </section>
+
+    <section id="paired-key" hidden>
+      <h2>Key registered</h2>
+      <p>Add this key to GitHub twice, as an <em>Authentication key</em> and as a <em>Signing key</em>, and to the
+        dev box's git/jj signing config.</p>
+      <pre id="paired-key-text" class="key"></pre>
+      <div class="row">
+        <button id="paired-key-copy" class="secondary">Copy</button>
+        <button id="paired-key-done">Done</button>
+      </div>
+    </section>
+
+    <section id="requests" hidden>
+      <div class="section-head">
+        <h2>Pending</h2>
+        <span id="conn" class="conn"></span>
+      </div>
+      <p id="empty" class="muted">Nothing waiting. New requests show up here and as notifications.</p>
+      <ol id="request-list" class="cards"></ol>
+      <div id="actions" class="row sticky" hidden>
+        <button id="approve">Approve</button>
+        <button id="deny" class="danger">Deny</button>
+      </div>
+    </section>
+
+    <section id="setup" hidden>
+      <details id="setup-details">
+        <summary>Notifications, grants and keys</summary>
+        <h3>Notifications</h3>
+        <p id="push-state" class="muted"></p>
+        <div class="row">
+          <button id="push-enable" class="secondary">Enable notifications</button>
+          <button id="push-test" class="secondary">Send test</button>
+        </div>
+        <h3>Grants</h3>
+        <p class="muted">After an approval, keep the key in this page's memory for a short time and sign further requests
+          from the same process tree (one <code>jj</code> or <code>git</code> invocation) without Face ID. The scope comes
+          from the dev box, so a compromised dev box could pass a request off as part of it.</p>
+        <label>Grant length <select id="grant-seconds"></select></label>
+        <h3>Keys</h3>
+        <ul id="keys" class="plain"></ul>
+        <button id="add-key" class="secondary">Add another passkey</button>
+        <h3>Session</h3>
+        <button id="logout" class="secondary">Log out</button>
+      </details>
+    </section>
+
+    <section id="history-section" hidden>
+      <details id="history-details">
+        <summary>Recent</summary>
+        <ol id="history" class="plain history"></ol>
+      </details>
+    </section>
+
+    <section id="diag">
+      <details id="diag-details">
+        <summary>Diagnostics</summary>
+        <p class="muted">Checks for the PoC: PRF support, Ed25519 correctness, and that every device derives the same key.</p>
+        <dl id="env" class="kv"></dl>
+        <label>Ed25519 implementation <select id="impl-pref">
+          <option value="auto">auto (WebCrypto if it passes the self-test)</option>
+          <option value="webcrypto">WebCrypto</option>
+          <option value="noble">noble-ed25519 (vendored)</option>
+        </select></label>
+        <div class="row">
+          <button id="diag-derive" class="secondary">Derive key</button>
+          <button id="diag-sign" class="secondary">Sign test message</button>
+        </div>
+        <pre id="diag-out" class="key" hidden></pre>
+      </details>
+    </section>
+  </main>
+</body>
+</html>
