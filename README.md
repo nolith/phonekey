@@ -182,13 +182,18 @@ modules = [
   - can only write its own state directory, and can't see other accounts'
     processes
   - runs under a syscall filter, with no access to the host's tailscaled or
-    D-Bus sockets, and limits on memory and tasks
+    D-Bus sockets or `/dev/shm`, and can only execute programs from the Nix
+    store
+  - has limits on memory, tasks, CPU (one core) and IO priority
+  - can't bind host ports, except tsnet's UDP socket or a TCP `address`
   - can't reach localhost, link-local, private or tailnet addresses, except
     DNS resolvers (systemd-resolved, MagicDNS over IPv4 and IPv6,
     `networking.nameservers`). If
     your resolver comes from DHCP on a private network, add it to
     `ipAddressAllow`. With a TCP `address`, this network restriction is left
-    out so connections can come in.
+    out so connections can come in. In the built-in tailnet mode it doesn't
+    cover traffic inside the tailnet, which runs in phonekeyd; that takes the
+    ACL described under [Auth key](#own-tailnet-machine).
 
   `systemd-analyze security` rates each instance 1.1 ("OK").
 

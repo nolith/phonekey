@@ -111,10 +111,15 @@
             # EPERM rather than a kill: Go's runtime calls setrlimit at startup.
             SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
             SystemCallErrorNumber = "EPERM";
-            # The host's tailscaled and D-Bus are off limits.
-            InaccessiblePaths = [ "-/run/tailscale" "-/run/dbus" "-/var/run/dbus" ];
+            # The host's tailscaled, D-Bus and shared memory are off limits.
+            InaccessiblePaths = [ "-/run/tailscale" "-/run/dbus" "-/var/run/dbus" "-/dev/shm" ];
+            # Only programs from the Nix store run, not files it wrote.
+            NoExecPaths = "/";
+            ExecPaths = "/nix/store";
             MemoryMax = "512M";
             TasksMax = 256;
+            CPUQuota = "100%";
+            IOWeight = 20;
           };
           # systemd-run's -p form of a service config.
           toProperties = attrs: lib.concatLists (lib.mapAttrsToList (k: v:
@@ -161,11 +166,15 @@
                   '';
                 };
                 authKeyFile = lib.mkOption {
-                  type = lib.types.nullOr lib.types.path;
+                  # A string, not a path: ./key would be copied into the Nix store.
+                  type = lib.types.nullOr (lib.types.strMatching "/.*");
                   default = null;
+                  example = "/run/secrets/phonekey-ts-authkey";
                   description = ''
-                    Tailscale auth key for the first login. Without one, the service
-                    logs a URL to approve the machine (journalctl -u phonekeyd-<name>).
+                    Tailscale auth key for the first login, as an absolute path outside
+                    the Nix store. It must exist whenever the service starts. Without
+                    one, the service logs a URL to approve the machine
+                    (journalctl -u phonekeyd-<name>).
                   '';
                 };
               };
@@ -240,6 +249,10 @@
                 message = "services.phonekeyd.instances.${name}: serve.httpsPort publishes the instance's Unix socket, so it can't be combined with tailscale.hostname or address.";
               }
               {
+                assertion = i.tailscale.authKeyFile == null || !lib.hasPrefix builtins.storeDir i.tailscale.authKeyFile;
+                message = "services.phonekeyd.instances.${name}: tailscale.authKeyFile is in the Nix store, readable by everyone; use a path outside it.";
+              }
+              {
                 assertion = i.serve.httpsPort == null || config.services.tailscale.enable;
                 message = "services.phonekeyd.instances.${name}: serve.httpsPort needs services.tailscale.enable.";
               }
@@ -266,6 +279,8 @@
                 wantedBy = [ "multi-user.target" ];
                 wants = [ "network-online.target" ];
                 after = [ "network-online.target" ];
+                # Keep restarting after crashes, however many.
+                startLimitIntervalSec = 0;
                 serviceConfig = {
                   ExecStart = lib.escapeShellArgs (
                     [ (lib.getExe cfg.package) "--db" "${stateDir name}/phonekey.db" "serve" "--vapid-subject" i.vapidSubject ]
@@ -278,6 +293,12 @@
                   RuntimeDirectory = user name;
                   RuntimeDirectoryMode = "0750";
                   Restart = "on-failure";
+                  RestartSec = 2;
+                  # Binding host ports: tsnet's WireGuard socket (UDP), or the TCP
+                  # listener. Connections out don't bind.
+                  SocketBindDeny = "any";
+                  SocketBindAllow = lib.optional (i.tailscale.hostname != null) "udp"
+                    ++ lib.optional (tcpListener name i) "tcp:${lib.last (lib.splitString ":" (listen name i))}";
                   # Outbound HTTPS for push; netlink only for tsnet.
                   RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ]
                     ++ lib.optional (i.tailscale.hostname != null) "AF_NETLINK";
@@ -392,7 +413,9 @@
                 '';
               };
               ssh.hosts = lib.mkOption {
-                type = lib.types.listOf lib.types.str;
+                # One ssh_config pattern each; whitespace or a comma would break
+                # /etc/ssh/ssh_config for every user.
+                type = lib.types.listOf (lib.types.strMatching "[^[:space:],]+");
                 default = [ "github.com" ];
                 example = [ "github.com" "git.example.com" ];
                 description = ''
