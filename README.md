@@ -788,11 +788,6 @@ Things found while testing:
 
 ## Open questions and future work
 
-- **iOS, remaining.** Push reliability over time (Focus modes, permission
-  resets). Whether Safari used its own Ed25519 or the noble fallback; either
-  way, the signatures verified. Diagnostics shows which.
-- **The same key on a second device.** An iCloud Keychain passkey synced to a
-  Mac should derive the same key there. Untested.
 - **GitHub.** How long it waits during an SSH login decides the agent's
   `--deadline`. Not measured.
 - **The NixOS module on a real host.** The units evaluate and score well, and
@@ -801,21 +796,28 @@ Things found while testing:
   `tailscale serve` helper have only run in that partial form. A
   `runNixOSTest` VM test would check all of it repeatedly; it needs KVM, e.g. in
   CI (GitHub's Linux runners have it).
-- **Grants on desktop.** A grant ends when the page is hidden. On macOS, Chrome
-  may count a fully covered window as hidden. That costs a re-approval, nothing
-  worse. If it's annoying, end grants on hide only on mobile.
-- **Grant scope.** Process tree only. A "whole dev box" option would cover
-  several separate commands in a row, at the cost of auto-signing anything from
-  that box during the window.
-- **Showing a range before approving.** For `jj sign -r X` the agent could list
-  the commits in `X` up front. That's command-specific, and still unverified
-  context.
+- **Showing a range before approving.** A grant signs commits you only see
+  afterwards. For `jj sign -r X`, the agent knows the command line and its
+  working directory. It could run `jj log -r X --ignore-working-copy` there and
+  attach the commits (subject, change id) to the first request, so the card
+  shows "this command will sign: a, b, c, d" before you approve.
+  - It's command-specific. `jj git push` decides what to sign from the pushed
+    bookmarks and the sign-on-push revset, which is harder to reproduce, and
+    `git rebase -S` would need its own handling.
+  - The list could differ from what's actually signed, e.g. when jj skips
+    commits that are already signed.
+  - Like all dev box context, it's unverified.
 - **Checkboxes or per-card buttons.** Multi-select only helps when unrelated
   requests are pending at once. Per-card buttons would be simpler.
 - **Upstream order.** `--upstream-first`, to offer 1Password's keys before the
   phone key.
-- **Hardening.** Rate limits, a session list with revocation, keeping history
-  beyond `--retention`.
+- **Rate limits.** `/api/web/nonce` needs no login, and every queued request
+  sends a push, so a device on the tailnet (or a dev box token) could fill the
+  nonce table or spam notifications.
+- **A list of logins.** Showing each logged-in device, and ending them one at a
+  time. Today only removing a key ends logins, all of that key's at once.
+- **Longer history.** Resolved requests are deleted after `--retention`
+  (7 days); a permanent audit log would need its own storage.
 - **Passkey-native signatures.** `webauthn-sk-ecdsa` signatures straight from the
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
