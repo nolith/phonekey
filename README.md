@@ -128,7 +128,7 @@ state or reach it.
 ```nix
 # flake inputs: phonekey.url = "github:<you>/phonekey";
 modules = [
-  phonekey.nixosModules.default
+  phonekey.nixosModules.phonekeyd   # or .default, with the dev box module too
   {
     services.tailscale.enable = true;  # for serve.httpsPort
     services.phonekeyd.instances = {
@@ -270,8 +270,18 @@ phonekey-agent --backend https://phonekey.<tailnet>.ts.net --token-file ~/.confi
   SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | head -1 > ~/.ssh/phonekey.pub
   ```
 
-To keep the agent running, a systemd user unit is enough (no root needed). For
-example, `~/.config/systemd/user/phonekey-agent.service`:
+On NixOS, `phonekey.nixosModules.phonekey-agent` sets this up per user:
+`programs.phonekey-agent.users.<name> = { backend = …; upstream = …; }` gives
+that user:
+- the agent as a systemd user service
+- the binaries and a `phonekey-use` switching helper
+- ssh pointed at the agent
+
+The token goes in `~/.config/phonekey/token`; the service waits for it.
+[QUICKSTART.md](QUICKSTART.md) shows it in full.
+
+Elsewhere, a systemd user unit is enough (no root needed). For example,
+`~/.config/systemd/user/phonekey-agent.service`:
 
 ```ini
 [Service]
@@ -291,8 +301,11 @@ export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock      # bash
 $env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
 ```
 
-Alternatively, leave `SSH_AUTH_SOCK` alone and set `IdentityAgent` in
-`~/.ssh/config` for ssh. git and jj signing need the environment variable.
+Alternatively, leave `SSH_AUTH_SOCK` alone:
+- **ssh:** `IdentityAgent $XDG_RUNTIME_DIR/phonekey-agent.sock` in
+  `~/.ssh/config` (the NixOS module does this).
+- **git and jj:** sign through `phonekey-keygen` (below), which finds the
+  agent's socket by itself.
 
 Point the tools at a symlink rather than at the key itself, so that switching
 keys later (see below) is one command:
@@ -306,6 +319,8 @@ ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub
 ```ini
 [gpg]
 	format = ssh
+[gpg "ssh"]
+	program = phonekey-keygen   # optional: finds the agent without SSH_AUTH_SOCK
 [user]
 	signingkey = ~/.ssh/active.pub
 ```
@@ -340,7 +355,8 @@ Host github.com
 
 **Switching between 1Password and the phone.** With `--upstream`, one agent
 offers both kinds of key. The tools above sign with whatever `active.pub`
-points at:
+points at. With the NixOS module, `phonekey-use desktop` / `phonekey-use phone`
+switches between named keys. By hand:
 
 ```sh
 ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub   # at the desk: 1Password approves
@@ -468,14 +484,14 @@ deletes resolved ones after `--retention` (7 days).
 | `internal/agent/context.go`, `proc_linux.go` | finding the requesting process (`SO_PEERCRED`, `/proc`), the scope, ssh destination and git action, reading git's commit file |
 | `internal/agent/knownhosts.go` | naming the server from known_hosts, including hashed entries |
 | `internal/agent/client.go` | the dev box API client |
-| `cmd/phonekey-keygen` | the jj shim |
+| `cmd/phonekey-keygen` | the jj shim; also points git and jj at the agent's socket without `SSH_AUTH_SOCK` |
 | `web/app.js` | the page: pairing, login, approvals, grants, push, Recent, diagnostics |
 | `web/ed25519.js`, `web/sshsig.js` | key derivation and signing; SSH wire encoding and SSHSIG armor |
 | `web/sw.js` | the service worker: shows a notification for every push, opens the request on click |
 | `web/vendor/noble-ed25519.js` | `@noble/ed25519` 3.2.0, unmodified (integrity hash in `web/vendor/README.md`) |
 | `internal/sim`, `cmd/phonekey-sim` | a fake approver for tests and manual testing (see [Development](#development)) |
 | `e2e/` | end-to-end tests (see [Development](#development)) |
-| `flake.nix` | the devshell; packages `phonekeyd` (server) and `phonekey-agent` (agent and jj shim), `default` with both; `nixosModules.default` (`services.phonekeyd.instances`) |
+| `flake.nix` | the devshell; packages `phonekeyd` (server) and `phonekey-agent` (agent and jj shim), `default` with both; NixOS modules `phonekeyd` (`services.phonekeyd.instances`) and `phonekey-agent` (`programs.phonekey-agent.users`), `default` with both |
 
 ### Backend API
 
@@ -520,6 +536,10 @@ deletes resolved ones after `--retention` (7 days).
 
 ### Agent
 
+- **Settings** come from flags or `PHONEKEY_*` environment variables
+  (`PHONEKEY_BACKEND`, `PHONEKEY_TOKEN_FILE`, `PHONEKEY_UPSTREAM`, …). Paths
+  may contain `$HOME` or `$XDG_RUNTIME_DIR`, which the agent expands. That's
+  how the NixOS module's per-user settings file works.
 - **Per-connection state.** Each client connection gets its own state. That
   holds the session bindings and an upstream connection, if any.
 - **Cancel on disconnect.** `x/crypto/ssh/agent.ServeAgent` doesn't read from
@@ -811,4 +831,3 @@ bin/phonekey-sim watch --ask
 - **Passkey-native signatures.** `webauthn-sk-ecdsa` signatures straight from the
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
-- **An agent module.** NixOS or home-manager, for the dev box side.

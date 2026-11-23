@@ -28,7 +28,7 @@ In the host's system flake (`/etc/nixos/flake.nix`):
      nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
        modules = [
          ./configuration.nix
-+        phonekey.nixosModules.default
++        phonekey.nixosModules.phonekeyd
 +        {
 +          services.phonekeyd.instances.you = {
 +            vapidSubject = "https://phonekey.YOURTAILNET.ts.net";
@@ -84,29 +84,32 @@ echo 'pkd_…' > ~/.config/phonekey/token
 chmod 600 ~/.config/phonekey/token
 ```
 
-Run the agent as a systemd user service, from the dev box's system flake (with
-the same `phonekey` input as above):
+In the dev box's system flake (with the same `phonekey` input as above; on
+the same machine as the backend, `phonekey.nixosModules.default` brings both
+modules):
 
 ```nix
-({ pkgs, ... }: let
-  agent = phonekey.packages.${pkgs.stdenv.hostPlatform.system}.phonekey-agent;
-in {
-  environment.systemPackages = [ agent ];  # phonekey-agent, and phonekey-keygen for jj
-  systemd.user.services.phonekey-agent = {
-    description = "phonekey ssh-agent";
-    wantedBy = [ "default.target" ];
-    # Runs for every user who has a token file.
-    unitConfig.ConditionPathExists = "%h/.config/phonekey/token";
-    serviceConfig = {
-      # %h = home, %t = $XDG_RUNTIME_DIR. --upstream also offers the keys of a
-      # forwarded 1Password agent while an `ssh -A` session is connected.
-      ExecStart = "${agent}/bin/phonekey-agent --backend https://phonekey.YOURTAILNET.ts.net"
-        + " --token-file %h/.config/phonekey/token --upstream %t/op-agent.sock";
-      Restart = "on-failure";
-    };
+phonekey.nixosModules.phonekey-agent
+{
+  programs.phonekey-agent.users.you = {
+    backend = "https://phonekey.YOURTAILNET.ts.net";
+    # Also offer a forwarded 1Password agent's keys (while `ssh -A` is connected).
+    upstream = "$XDG_RUNTIME_DIR/op-agent.sock";
+    # Names for `phonekey-use`.
+    identities = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
+    # For github.com, sign in with ~/.ssh/active.pub only.
+    ssh.github = true;
   };
-})
+}
 ```
+
+That gives `you`:
+- the agent as a systemd user service
+- `phonekey-agent`, `phonekey-keygen` and `phonekey-use` in your `PATH`
+- ssh pointed at the agent (`IdentityAgent`, in the system's ssh_config; your
+  own `~/.ssh/config` still wins)
+
+Nothing needs `SSH_AUTH_SOCK`.
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/nixos#mydevbox
@@ -114,33 +117,33 @@ systemctl --user start phonekey-agent      # from the next login on it starts by
 journalctl --user -u phonekey-agent -f
 ```
 
-## 4. Your shell and tools
+## 4. Your keys and tools
 
-Use the agent from your shell. In nushell's `env.nu`:
-
-```nu
-$env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"
-```
-
-Save the phone key, and point the tools at a symlink so you can switch between
-the phone and 1Password:
+Save the phone key, and make it the active one:
 
 ```sh
-ssh-add -L | grep '<the start of your key>' > ~/.ssh/phonekey.pub
-ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub
+SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | grep '<the start of your key>' > ~/.ssh/phonekey.pub
+phonekey-use phone
 ```
 
 ```nu
-# in config.nu
-alias mobile = ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub    # approve on the phone
-alias desktop = ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub  # approve with 1Password (needs ssh -A)
+# the same in nushell
+with-env { SSH_AUTH_SOCK: $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock" } { ssh-add -L } | lines | where $it =~ '<the start of your key>' | save -f ~/.ssh/phonekey.pub
+phonekey-use phone
 ```
 
-**git** (`~/.config/git/config`):
+git, jj and ssh sign with whatever `~/.ssh/active.pub` points at. Switch with
+`phonekey-use phone` (approve on the phone) or `phonekey-use desktop` (approve
+with 1Password, which needs an `ssh -A` session). `phonekey-use` on its own
+shows the current one.
+
+**git** (`~/.config/git/config`). `phonekey-keygen` finds the agent by itself:
 
 ```ini
 [gpg]
 	format = ssh
+[gpg "ssh"]
+	program = phonekey-keygen
 [user]
 	signingkey = ~/.ssh/active.pub
 ```
@@ -161,13 +164,7 @@ program = "phonekey-keygen"
 git-sign-on-push = "~signed() & mine()"
 ```
 
-**ssh** (`~/.ssh/config`):
-
-```
-Host github.com
-  IdentityFile ~/.ssh/active.pub
-  IdentitiesOnly yes
-```
+ssh needs no config of your own: the module sets it up.
 
 ## 5. Try it
 
@@ -196,10 +193,12 @@ needed unless the hostname changes.
 ## When something's off
 
 - **`Load key "….pub": bad permissions` / `Permission denied (publickey)`.** The
-  agent ssh talks to doesn't have that key. Either `SSH_AUTH_SOCK` points
-  elsewhere, the agent isn't running (`systemctl --user status
-  phonekey-agent`), or `active.pub` points at the 1Password key while no
+  agent ssh talks to doesn't have that key. Either the agent isn't running
+  (`systemctl --user status phonekey-agent`), your own `~/.ssh/config` points
+  ssh at another agent, or `active.pub` points at the 1Password key while no
   `ssh -A` session is connected.
+- **The agent doesn't start:** it waits for `~/.config/phonekey/token`. Check
+  `systemctl --user status phonekey-agent`.
 - **No notification:** check **Send test** in the app, and that the request
   shows up in the app at all (if so, it's the notification side).
 - **The page shows "reconnecting…":** it reconnects by itself; **Reload** in

@@ -48,15 +48,19 @@
       checks = forAll (pkgs: {
         tests = goBuild pkgs {
           pname = "phonekey-tests";
-          subPackages = [ "internal/..." ];
+          subPackages = [ "internal/..." "cmd/..." ];
           doCheck = true;
         };
       });
 
+      # Both modules; each does nothing until its options are set.
+      nixosModules.default = {
+        imports = [ self.nixosModules.phonekeyd self.nixosModules.phonekey-agent ];
+      };
+
       # The backend as NixOS services: one instance per person, each under its
-      # own system account. The dev box side (phonekey-agent) is a per-user
-      # process; see the README.
-      nixosModules.default = { config, lib, pkgs, ... }:
+      # own system account.
+      nixosModules.phonekeyd = { config, lib, pkgs, ... }:
         let
           cfg = config.services.phonekeyd;
           instances = lib.filterAttrs (_: i: i.enable) cfg.instances;
@@ -311,6 +315,127 @@
                 };
               };
             }) instances);
+          };
+        };
+
+      # The dev box side: phonekey-agent as a systemd user service for the
+      # listed users, each with their own backend, plus ssh pointed at it. git
+      # and jj sign through phonekey-keygen, which finds the agent's socket by
+      # itself, so nothing needs SSH_AUTH_SOCK.
+      nixosModules.phonekey-agent = { config, lib, pkgs, ... }:
+        let
+          cfg = config.programs.phonekey-agent;
+          home = path: lib.replaceStrings [ "~/" ] [ "$HOME/" ] path;
+          # phonekey-use NAME|FILE points ~/.ssh/active.pub at a public key,
+          # which git, jj and ssh are configured to sign with.
+          use = name: u: pkgs.writeShellScriptBin "phonekey-use" ''
+            set -eu
+            link="$HOME/.ssh/active.pub"
+            if [ $# -eq 0 ]; then
+              if [ -L "$link" ]; then echo "active: $(readlink "$link")"; else echo "no $link yet"; fi
+              echo "names: ${lib.concatStringsSep " " (lib.attrNames u.identities)}"
+              exit 0
+            fi
+            case "$1" in
+            ${lib.concatStrings (lib.mapAttrsToList (n: path: ''
+              ${n}) key="${home path}" ;;
+            '') u.identities)}
+            *) key="$1" ;;
+            esac
+            if [ ! -e "$key" ]; then echo "phonekey-use: $key doesn't exist" >&2; exit 1; fi
+            ln -sfn "$key" "$link"
+            echo "active: $key"
+          '';
+          userOptions = {
+            options = {
+              backend = lib.mkOption {
+                type = lib.types.str;
+                example = "https://phonekey.tail1234ab.ts.net";
+                description = "The user's phonekeyd.";
+              };
+              upstream = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                example = "$XDG_RUNTIME_DIR/op-agent.sock";
+                description = "Another agent whose keys to offer too, e.g. a forwarded 1Password agent.";
+              };
+              identities = lib.mkOption {
+                type = lib.types.attrsOf lib.types.str;
+                default = { phone = "~/.ssh/phonekey.pub"; };
+                example = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
+                description = "Names for `phonekey-use`, e.g. `phonekey-use desktop`.";
+              };
+              ssh.identityAgent = lib.mkOption {
+                type = lib.types.bool;
+                default = true;
+                description = ''
+                  Point ssh at the agent (IdentityAgent, in the system ssh_config).
+                  The user's own ~/.ssh/config takes precedence, e.g.
+                  `IdentityAgent SSH_AUTH_SOCK` to use SSH_AUTH_SOCK instead.
+                '';
+              };
+              ssh.github = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  For github.com, use only ~/.ssh/active.pub (IdentityFile,
+                  IdentitiesOnly). IdentityFile adds to any the user sets.
+                '';
+              };
+            };
+          };
+        in
+        {
+          options.programs.phonekey-agent = {
+            package = lib.mkOption {
+              type = lib.types.package;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.phonekey-agent;
+              description = "Package providing phonekey-agent and phonekey-keygen.";
+            };
+            users = lib.mkOption {
+              type = lib.types.attrsOf (lib.types.submodule userOptions);
+              default = { };
+              description = "Users (who must exist) to run the agent for, and their settings.";
+            };
+          };
+
+          config = lib.mkIf (cfg.users != { }) {
+            # Per-user settings, read by the one user unit below via %u. The
+            # token itself stays in the user's home directory.
+            environment.etc = lib.mapAttrs' (name: u: lib.nameValuePair "phonekey/agent/${name}.env" {
+              text = ''
+                PHONEKEY_BACKEND=${u.backend}
+                PHONEKEY_TOKEN_FILE=$HOME/.config/phonekey/token
+              '' + lib.optionalString (u.upstream != null) ''
+                PHONEKEY_UPSTREAM=${u.upstream}
+              '';
+            }) cfg.users;
+
+            systemd.user.services.phonekey-agent = {
+              description = "phonekey ssh-agent";
+              wantedBy = [ "default.target" ];
+              # Starts only for the listed users, once they've stored their dev
+              # box token (kept out of the Nix store) in ~/.config/phonekey/token.
+              unitConfig.ConditionPathExists = [ "/etc/phonekey/agent/%u.env" "%h/.config/phonekey/token" ];
+              serviceConfig = {
+                EnvironmentFile = "/etc/phonekey/agent/%u.env";
+                ExecStart = lib.getExe cfg.package;
+                Restart = "on-failure";
+                RestartSec = 5;
+              };
+            };
+
+            users.users = lib.mapAttrs (name: u: { packages = [ cfg.package (use name u) ]; }) cfg.users;
+
+            programs.ssh.extraConfig = lib.concatStrings (lib.mapAttrsToList (name: u:
+              lib.optionalString u.ssh.identityAgent ''
+                Match localuser ${name}
+                  IdentityAgent /run/user/%i/phonekey-agent.sock
+              '' + lib.optionalString u.ssh.github ''
+                Match localuser ${name} host github.com
+                  IdentityFile ~/.ssh/active.pub
+                  IdentitiesOnly yes
+              '') cfg.users);
           };
         };
 
