@@ -42,8 +42,54 @@
             if i.address != null then i.address
             else if i.tailscale.hostname == null then "unix:${socket name}"
             else null;
+          # The sandbox every instance runs in, so that a compromised phonekeyd
+          # (a bug, or a malicious dependency) can't reach beyond its own state:
+          # not other services, accounts or instances on the host.
+          sandbox = name: {
+            User = user name;
+            Group = user name;
+            StateDirectory = "phonekeyd/${name}";
+            StateDirectoryMode = "0700";
+            UMask = "0077";
+            CapabilityBoundingSet = "";
+            AmbientCapabilities = "";
+            NoNewPrivileges = true;
+            PrivateUsers = true;
+            PrivateTmp = true;
+            PrivateDevices = true;
+            PrivateIPC = true;
+            RemoveIPC = true;
+            ProtectSystem = "strict";
+            ProtectHome = true;
+            # Other accounts can't see the process, nor it theirs.
+            ProtectProc = "invisible";
+            ProcSubset = "pid";
+            ProtectClock = true;
+            ProtectHostname = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectKernelLogs = true;
+            ProtectControlGroups = true;
+            RestrictNamespaces = true;
+            RestrictRealtime = true;
+            RestrictSUIDSGID = true;
+            LockPersonality = true;
+            MemoryDenyWriteExecute = true;
+            SystemCallArchitectures = "native";
+            # EPERM rather than a kill: Go's runtime calls setrlimit at startup.
+            SystemCallFilter = [ "@system-service" "~@privileged" "~@resources" ];
+            SystemCallErrorNumber = "EPERM";
+            # The host's tailscaled and D-Bus are off limits.
+            InaccessiblePaths = [ "-/run/tailscale" "-/run/dbus" "-/var/run/dbus" ];
+            MemoryMax = "512M";
+            TasksMax = 256;
+          };
+          # systemd-run's -p form of a service config.
+          toProperties = attrs: lib.concatLists (lib.mapAttrsToList (k: v:
+            [ "-p" "${k}=${if lib.isList v then lib.concatStringsSep " " (map toString v) else if lib.isBool v then lib.boolToString v else toString v}" ]
+          ) attrs);
           # Admin commands (pair-code, devbox add, keys) on an instance's
-          # database, as its account so file ownership stays right.
+          # database: run as its account, in its sandbox, without network.
           ctl = pkgs.writeShellScriptBin "phonekeyd-ctl" ''
             if [ $# -lt 2 ]; then
               echo "usage: phonekeyd-ctl INSTANCE COMMAND [ARGS...]" >&2
@@ -53,11 +99,16 @@
             name=$1; shift
             case "$name" in
             ${lib.concatMapStrings (name: ''
-              ${name}) exec ${pkgs.util-linux}/bin/runuser -u ${user name} -- ${lib.getExe cfg.package} --db ${stateDir name}/phonekey.db "$@" ;;
+              ${name}) exec ${config.systemd.package}/bin/systemd-run --quiet --pipe --wait --collect --service-type=exec \
+                ${lib.escapeShellArgs (toProperties (sandbox name // { PrivateNetwork = true; }))} \
+                -- ${lib.getExe cfg.package} --db ${stateDir name}/phonekey.db "$@" ;;
             '') (lib.attrNames instances)}
             *) echo "phonekeyd-ctl: unknown instance $name" >&2; exit 2 ;;
             esac
           '';
+          # Where a TCP listener is used, incoming connections must stay
+          # possible, so the address restrictions only apply otherwise.
+          tcpListener = name: i: listen name i != null && !lib.hasPrefix "unix:" (listen name i);
           instanceOptions = { name, ... }: {
             options = {
               enable = lib.mkEnableOption "this instance" // { default = true; };
@@ -109,6 +160,17 @@
                   by every account on the host.
                 '';
               };
+              ipAddressAllow = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                example = [ "192.168.1.1" ];
+                description = ''
+                  Addresses the instance may reach despite the ban on the host,
+                  link-local, private and tailnet ranges, e.g. a DNS resolver on the
+                  LAN. systemd-resolved's stub, Tailscale's MagicDNS resolver and
+                  networking.nameservers are always allowed.
+                '';
+              };
               extraArgs = lib.mkOption {
                 type = lib.types.listOf lib.types.str;
                 default = [ ];
@@ -149,7 +211,14 @@
                 assertion = i.serve.httpsPort == null || config.services.tailscale.enable;
                 message = "services.phonekeyd.instances.${name}: serve.httpsPort needs services.tailscale.enable.";
               }
-            ]) instances);
+            ]) instances) ++ [
+              {
+                # Browsers treat every port of a hostname as one site: instances
+                # sharing the host's name would share cookies and passkeys.
+                assertion = lib.length (lib.filter (i: i.serve.httpsPort != null) (lib.attrValues instances)) <= 1;
+                message = "services.phonekeyd: at most one instance can use serve.httpsPort (the host's hostname); give the others tailscale.hostname.";
+              }
+            ];
 
             users.users = lib.mapAttrs' (name: _: lib.nameValuePair (user name) {
               isSystemUser = true;
@@ -174,32 +243,18 @@
                     ++ i.extraArgs
                   );
                   LoadCredential = lib.optional (i.tailscale.authKeyFile != null) "tailscale-authkey:${i.tailscale.authKeyFile}";
-                  User = user name;
-                  Group = user name;
-                  StateDirectory = "phonekeyd/${name}";
-                  StateDirectoryMode = "0700";
                   RuntimeDirectory = user name;
                   RuntimeDirectoryMode = "0750";
-                  UMask = "0077";
                   Restart = "on-failure";
-
-                  # Other accounts on the host can't see or reach the process.
-                  ProtectProc = "invisible";
-                  ProcSubset = "pid";
-                  NoNewPrivileges = true;
-                  PrivateTmp = true;
-                  PrivateDevices = true;
-                  ProtectSystem = "strict";
-                  ProtectHome = true;
-                  ProtectKernelTunables = true;
-                  ProtectKernelModules = true;
-                  ProtectControlGroups = true;
-                  RestrictNamespaces = true;
-                  RestrictRealtime = true;
-                  LockPersonality = true;
-                  MemoryDenyWriteExecute = true;
-                  SystemCallArchitectures = "native";
-                  RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+                  # Outbound HTTPS for push; netlink only for tsnet.
+                  RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ]
+                    ++ lib.optional (i.tailscale.hostname != null) "AF_NETLINK";
+                } // sandbox name // lib.optionalAttrs (!tcpListener name i) {
+                  # Nothing on the host or the local networks: push services and
+                  # the tailnet's control and relay servers are on the internet.
+                  # (tsnet's own tailnet traffic is userspace and needs ACLs.)
+                  IPAddressDeny = [ "localhost" "link-local" "multicast" "10.0.0.0/8" "172.16.0.0/12" "192.168.0.0/16" "100.64.0.0/10" "fc00::/7" ];
+                  IPAddressAllow = [ "127.0.0.53" "100.100.100.100" ] ++ config.networking.nameservers ++ i.ipAddressAllow;
                 };
               };
               "${user name}-serve" = lib.mkIf (i.serve.httpsPort != null) {
@@ -210,6 +265,18 @@
                 serviceConfig = {
                   Type = "oneshot";
                   RemainAfterExit = true;
+                  # Root, but only to talk to tailscaled's socket.
+                  PrivateNetwork = true;
+                  PrivateTmp = true;
+                  PrivateDevices = true;
+                  ProtectSystem = "strict";
+                  ProtectHome = true;
+                  NoNewPrivileges = true;
+                  ProtectKernelTunables = true;
+                  ProtectKernelModules = true;
+                  ProtectControlGroups = true;
+                  RestrictAddressFamilies = [ "AF_UNIX" ];
+                  CapabilityBoundingSet = "";
                   ExecStart = "${lib.getExe config.services.tailscale.package} serve --bg --https=${toString i.serve.httpsPort} unix:${socket name}";
                   ExecStop = "${lib.getExe config.services.tailscale.package} serve --https=${toString i.serve.httpsPort} off";
                 };

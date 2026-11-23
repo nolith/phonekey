@@ -64,6 +64,11 @@ phonekeyd --db ~/phonekey/phonekey.db serve \
   `$TS_AUTHKEY`). Without one, phonekeyd logs a login URL and waits for you to
   approve the machine. The node state is kept in `tailscale/` next to the
   database, so later starts don't need either.
+- **Auth key.** Prefer a single-use, tagged auth key (e.g. `tag:phonekey`), and a
+  tailnet ACL that lets your devices reach that tag but gives the tag itself no
+  outbound access. The phonekey machine is a full tailnet member, and its
+  traffic runs inside phonekeyd, out of reach of host firewalls or systemd. A
+  single-use key can't add further machines if it leaks.
 - **Key expiry.** Consider disabling key expiry for the machine in the admin
   console, or it drops off the tailnet when its node key expires.
 - **No local listener.** There's no plain listener unless you add
@@ -142,9 +147,33 @@ modules = [
   honours by default.
 - **Other listeners.** `address` sets a different listener (`host:port` or
   `unix:/path`).
+- **One instance per hostname.** At most one instance may use `serve.httpsPort`
+  (the host's own hostname), and nothing else should be served on that
+  hostname, on any port. Browsers treat all ports of a hostname as one site:
+  services there would receive the instance's session cookie, and their pages
+  could ask for its passkey. Give further instances `tailscale.hostname`.
 - **Admin commands** run as root, with the instance name first:
   `phonekeyd-ctl samuel pair-code`, `phonekeyd-ctl samuel devbox add mybox`,
-  `phonekeyd-ctl samuel keys`.
+  `phonekeyd-ctl samuel keys`. They run in the instance's sandbox, as its
+  account, without network.
+- **Sandbox.** The goal is that a compromised phonekeyd (a bug, or a malicious
+  dependency) can't reach beyond its own instance: not other services, other
+  instances or accounts on the host. Each instance:
+  - runs as its own account with its own user namespace and no capabilities
+  - can only write its own state directory, and other accounts can't see its
+    process
+  - runs under a syscall filter, with no access to the host's tailscaled or
+    D-Bus sockets, and limits on memory and tasks
+  - can't reach localhost, link-local, private or tailnet addresses, except
+    DNS resolvers (systemd-resolved, MagicDNS, `networking.nameservers`). If
+    your resolver comes from DHCP on a private network, add it to
+    `ipAddressAllow`. With a TCP `address`, this network restriction is left
+    out so connections can come in.
+
+  `systemd-analyze security` rates each instance 1.1 ("OK"). The units come from
+  evaluating the module, and the binary was run under the same restrictions as
+  a user service, in both modes. IP filtering can only be verified on a real
+  host: a user's systemd can't enforce it.
 
 #### Either way
 
@@ -337,6 +366,8 @@ override; it needs a separate `JJ_CONFIG` or `--config`.
   devices with notifications.
   - **Remove** revokes a key: its logins end, so those devices are logged out
     and stop getting notifications, and its pending requests are denied.
+  - Removing a key, or adding one without a pairing code, asks for a
+    registered passkey first. A session alone can't change the keys.
   - Removing the key you're logged in with logs you out on this device, so to
     clean up several keys, log in with the one you keep first.
   - The last key can't be removed.
@@ -443,7 +474,9 @@ deletes resolved ones after `--retention` (7 days).
   and sets a 30-day `HttpOnly`, `SameSite=Strict` cookie. Listing requests
   therefore needs no Face ID; signing always does.
 - **Pairing** registers a new key. It needs a one-time code from `pair-code`, or
-  an existing session.
+  an existing session plus an *approval*: a registered key's signature over a
+  fresh nonce. Removing a key needs an approval too. A session cookie on its
+  own can read and deny requests, but can't change the registered keys.
 - **One user, many keys.** Any registered key can log in and sees everything.
   Each web session, and each push subscription made from it, belongs to the
   key that logged in. The page re-sends its existing subscription after each
