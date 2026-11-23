@@ -295,19 +295,42 @@ WantedBy=default.target
 
 ### 4. Point git, jj and ssh at it
 
-The agent's socket only needs to be `SSH_AUTH_SOCK` for the processes that sign:
+**How the pieces fit.**
+- **Logging in and signing both ask an agent.** ssh, logging in to a server,
+  and `ssh-keygen`, which git and jj run to sign commits, both ask an
+  ssh-agent to sign with a given public key.
+- **The key file picks the key.** Configure that key as a symlink,
+  `~/.ssh/active.pub`, and switching keys is one command.
+- **phonekey-agent picks who approves**, by the key it's asked to sign with:
+  - a key registered on your phonekeyd goes to the phone
+  - any other key goes to its `--upstream` agent, e.g. a forwarded 1Password
+    agent
 
-```sh
-export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock      # bash
-$env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
-```
+All that's left is getting the tools to talk to phonekey-agent. Pick one:
 
-Alternatively, leave `SSH_AUTH_SOCK` alone:
-- **ssh:** `IdentityAgent $XDG_RUNTIME_DIR/phonekey-agent.sock` in
-  `~/.ssh/config`, for the hosts that should use it (the NixOS module can do
-  this).
-- **git and jj:** sign through `phonekey-keygen` (below), which finds the
-  agent's socket by itself.
+- **Set `SSH_AUTH_SOCK` to it.** That's the simplest: ssh, git and jj all use
+  it, for every key and every host.
+  ```sh
+  export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock      # bash
+  $env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
+  ```
+- **Leave `SSH_AUTH_SOCK` alone,** e.g. because it points at another agent, or
+  because you can't set it per user (the NixOS module can't):
+  - **ssh:** `IdentityAgent $XDG_RUNTIME_DIR/phonekey-agent.sock` in
+    `~/.ssh/config`, for the hosts that should use it. The NixOS module can
+    add this for github.com (`ssh.github`).
+  - **git and jj:** sign through `phonekey-keygen` (below).
+
+`phonekey-keygen` stands in for `ssh-keygen`, which git and jj can be told to
+run instead. It runs the real `ssh-keygen` after doing two things:
+1. **It points `ssh-keygen` at phonekey-agent,** by setting `SSH_AUTH_SOCK`
+   for that one command. That's only needed if you leave `SSH_AUTH_SOCK` alone.
+2. **For jj, it turns stdin into a file.** jj passes the commit to
+   `ssh-keygen` on stdin, so the agent can't read it. The shim writes it to a
+   temporary file and passes that instead, as git does, so the phone can show
+   the commit's subject, author and change id. That's useful either way.
+
+Signatures are the same with or without it.
 
 Point the tools at a symlink rather than at the key itself, so that switching
 keys later (see below) is one command:
@@ -322,7 +345,7 @@ ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub
 [gpg]
 	format = ssh
 [gpg "ssh"]
-	program = phonekey-keygen   # optional: finds the agent without SSH_AUTH_SOCK
+	program = phonekey-keygen   # only needed if SSH_AUTH_SOCK isn't phonekey-agent
 [user]
 	signingkey = ~/.ssh/active.pub
 ```
@@ -342,10 +365,9 @@ program = "phonekey-keygen"      # lets the phone show jj's commits
 git-sign-on-push = "~signed() & mine()"   # ...sign the pushed commits instead
 ```
 
-jj passes the commit to `ssh-keygen` on stdin, so the agent can't see it.
-`phonekey-keygen` writes stdin to a temporary file and passes that instead, the
-way git does. The phone can then show the commit's subject, author and change
-id. Signatures are identical either way.
+To sign deliberately instead, drop the `[revsets]` part and run
+`jj sign -r a..d` before pushing. That's one command, so one approval with
+*Approve + rest*.
 
 **ssh**
 
