@@ -43,7 +43,7 @@ nothing is exposed to the internet. Pick one of two modes:
 | --- | --- | --- |
 | URL | `https://phonekey.<tailnet>.ts.net` | `https://<host>.<tailnet>.ts.net[:port]` |
 | Needs | nothing on the host; an auth key or one approval | root, or a Tailscale operator account, to configure `tailscale serve` |
-| Listens on the host | nothing: no TCP port, not even on 127.0.0.1 | `127.0.0.1:8080` (plain HTTP), which the host's tailscaled proxies to |
+| Listens on the host | nothing: no TCP port, not even on 127.0.0.1 | a Unix socket only phonekeyd's account and group can open (or a TCP address), which the host's tailscaled proxies to |
 | Who terminates TLS | phonekeyd itself (`tsnet`, the tailnet's certificate) | the host's tailscaled |
 | Hostname | its own, so it can move to another host | the host's |
 
@@ -75,44 +75,76 @@ phonekeyd --db ~/phonekey/phonekey.db serve \
 
 #### The host's Tailscale
 
-phonekeyd serves plain HTTP on `127.0.0.1:8080` (change with `--addr`), and the
-host's tailscaled terminates TLS in front of it:
+phonekeyd serves plain HTTP, and the host's tailscaled terminates TLS in front of
+it. Listen on a Unix socket, so other accounts on the host can't reach
+phonekeyd. The socket is created for phonekeyd's own account and group; root's
+tailscaled can always open it.
 
 ```sh
-phonekeyd --db ~/phonekey/phonekey.db serve --vapid-subject mailto:you@example.com
-sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080   # undo: sudo tailscale serve --https=8443 off
+phonekeyd --db ~/phonekey/phonekey.db serve --addr unix:$XDG_RUNTIME_DIR/phonekey.sock \
+  --vapid-subject mailto:you@example.com
+sudo tailscale serve --bg --https=8443 unix:$XDG_RUNTIME_DIR/phonekey.sock   # undo: sudo tailscale serve --https=8443 off
 ```
 
-Any port works. 443 gives the shortest URL, if it's free on that host. The local
-listener is reachable by every account on the host. That doesn't bypass
-anything (the web API needs a session, the dev box API a token), but on a
-shared host the built-in mode exposes less.
+- **Plain TCP.** `--addr host:port` works as well, and without `--addr` phonekeyd
+  listens on `127.0.0.1:8080`. Every account on the host can reach a TCP
+  listener. That doesn't bypass anything (the web API needs a session, the dev
+  box API a token), but it's more exposed than a socket.
+- **Port.** Any port works; 443 gives the shortest URL, if it's free on that
+  host.
 
 #### NixOS
 
-The flake's module runs either mode as a hardened system service, with the
-database in `/var/lib/phonekeyd`:
+The flake's module runs one instance per person. They aren't tied to Linux users
+on the box; each is a hardened system service under its own account
+`phonekeyd-<name>`, with its state in `/var/lib/phonekeyd/<name>`. Other
+services and accounts on the box, and the other instances, can't read its
+state, see its process or reach it.
 
 ```nix
 # flake inputs: phonekey.url = "github:<you>/phonekey";
 modules = [
   phonekey.nixosModules.default
   {
-    services.phonekeyd = {
-      enable = true;
-      vapidSubject = "mailto:you@example.com";
-      # Own tailnet machine:
-      tailscale.hostname = "phonekey";                    # https://phonekey.<tailnet>.ts.net
-      tailscale.authKeyFile = "/run/secrets/ts-authkey";  # optional; otherwise see journalctl -u phonekeyd
-      # Or, for the host's Tailscale, leave tailscale.* unset (phonekeyd then
-      # listens on 127.0.0.1:8080, see `address`) and run `tailscale serve` as above.
+    services.tailscale.enable = true;  # for serve.httpsPort
+    services.phonekeyd.instances = {
+      # The host's Tailscale: https://<host>.<tailnet>.ts.net:8443, proxied to
+      # /run/phonekeyd-samuel/http.sock.
+      samuel = {
+        vapidSubject = "mailto:samuel@example.com";
+        serve.httpsPort = 8443;
+      };
+      # Its own tailnet machine: https://phonekey-alice.<tailnet>.ts.net, nothing
+      # listening on the host.
+      alice = {
+        vapidSubject = "mailto:alice@example.com";
+        tailscale.hostname = "phonekey-alice";
+        tailscale.authKeyFile = "/run/secrets/alice-ts-authkey";  # optional; otherwise journalctl -u phonekeyd-alice
+      };
     };
   }
 ];
 ```
 
-Admin commands run as root: `phonekeyd-ctl pair-code`,
-`phonekeyd-ctl devbox add <name>`, `phonekeyd-ctl keys`.
+- **Default listener.** Without `tailscale.hostname`, an instance listens on
+  `/run/phonekeyd-<name>/http.sock`. `serve.httpsPort` publishes that socket
+  through the host's `tailscale serve`; you can also run `tailscale serve`
+  yourself.
+- **Public site.** To serve an instance publicly through nginx instead, proxy to
+  that socket and let nginx join the instance's group:
+  ```nix
+  users.users.nginx.extraGroups = [ "phonekeyd-samuel" ];
+  services.nginx.virtualHosts."phonekey.example.com".locations."/".proxyPass =
+    "http://unix:/run/phonekeyd-samuel/http.sock:";
+  ```
+  An event stream runs through that proxy, so turn off response buffering for
+  `/api/web/events`. phonekeyd sends `X-Accel-Buffering: no`, which nginx
+  honours by default.
+- **Other listeners.** `address` sets a different listener (`host:port` or
+  `unix:/path`).
+- **Admin commands** run as root, with the instance name first:
+  `phonekeyd-ctl samuel pair-code`, `phonekeyd-ctl samuel devbox add mybox`,
+  `phonekeyd-ctl samuel keys`.
 
 #### Either way
 
@@ -132,7 +164,7 @@ Admin commands run as root: `phonekeyd-ctl pair-code`,
 On the backend host, get a one-time code (valid 10 minutes):
 
 ```sh
-phonekeyd --db … pair-code        # or: sudo phonekeyd-ctl pair-code
+phonekeyd --db … pair-code        # NixOS: sudo phonekeyd-ctl <instance> pair-code
 ```
 
 **iPhone.** Use iCloud Keychain as the passkey provider. It approves with just
@@ -165,7 +197,7 @@ On the backend host, register the dev box and copy the token it prints. The
 backend stores only a hash, so the token can't be shown again.
 
 ```sh
-phonekeyd --db … devbox add mybox > mybox.token     # or: sudo phonekeyd-ctl devbox add mybox
+phonekeyd --db … devbox add mybox > mybox.token     # NixOS: sudo phonekeyd-ctl <instance> devbox add mybox
 ```
 
 On the dev box:
@@ -372,7 +404,7 @@ deletes resolved ones after `--retention` (7 days).
 | `web/vendor/noble-ed25519.js` | `@noble/ed25519` 3.2.0, unmodified (integrity hash in `web/vendor/README.md`) |
 | `internal/sim`, `cmd/phonekey-sim` | a fake approver for tests and manual testing (see [Development](#development)) |
 | `e2e/` | end-to-end tests (see [Development](#development)) |
-| `flake.nix` | the devshell, the package, and `nixosModules.default` |
+| `flake.nix` | the devshell, the package, and `nixosModules.default` (`services.phonekeyd.instances`) |
 
 ### Backend API
 

@@ -25,116 +25,196 @@
         };
       });
 
-      # The backend as a NixOS service. The dev box side (phonekey-agent) is a
-      # per-user process; see the README.
+      # The backend as NixOS services: one instance per person, each under its
+      # own system account. The dev box side (phonekey-agent) is a per-user
+      # process; see the README.
       nixosModules.default = { config, lib, pkgs, ... }:
         let
           cfg = config.services.phonekeyd;
-          stateDir = "/var/lib/phonekeyd";
-          db = "${stateDir}/phonekey.db";
-          # Admin commands (pair-code, devbox add, keys) on the service's
-          # database, as the service user so file ownership stays right.
+          instances = lib.filterAttrs (_: i: i.enable) cfg.instances;
+          user = name: "phonekeyd-${name}";
+          stateDir = name: "/var/lib/phonekeyd/${name}";
+          socket = name: "/run/phonekeyd-${name}/http.sock";
+          # The plain listener: an explicit address, or a socket only the
+          # instance's account (and root's tailscaled) can open when it isn't
+          # on its own tailnet machine.
+          listen = name: i:
+            if i.address != null then i.address
+            else if i.tailscale.hostname == null then "unix:${socket name}"
+            else null;
+          # Admin commands (pair-code, devbox add, keys) on an instance's
+          # database, as its account so file ownership stays right.
           ctl = pkgs.writeShellScriptBin "phonekeyd-ctl" ''
-            exec ${pkgs.util-linux}/bin/runuser -u phonekeyd -- ${lib.getExe cfg.package} --db ${db} "$@"
+            if [ $# -lt 2 ]; then
+              echo "usage: phonekeyd-ctl INSTANCE COMMAND [ARGS...]" >&2
+              echo "instances: ${lib.concatStringsSep " " (lib.attrNames instances)}" >&2
+              exit 2
+            fi
+            name=$1; shift
+            case "$name" in
+            ${lib.concatMapStrings (name: ''
+              ${name}) exec ${pkgs.util-linux}/bin/runuser -u ${user name} -- ${lib.getExe cfg.package} --db ${stateDir name}/phonekey.db "$@" ;;
+            '') (lib.attrNames instances)}
+            *) echo "phonekeyd-ctl: unknown instance $name" >&2; exit 2 ;;
+            esac
           '';
+          instanceOptions = { name, ... }: {
+            options = {
+              enable = lib.mkEnableOption "this instance" // { default = true; };
+              vapidSubject = lib.mkOption {
+                type = lib.types.str;
+                example = "mailto:you@example.com";
+                description = "Contact for push services (a mailto: or https: URL).";
+              };
+              tailscale = {
+                hostname = lib.mkOption {
+                  type = lib.types.nullOr lib.types.str;
+                  default = null;
+                  example = "phonekey";
+                  description = ''
+                    Join the tailnet as its own machine with this name and serve
+                    https://<hostname>.<tailnet>.ts.net. Nothing listens on the host.
+                    Needs MagicDNS and HTTPS enabled for the tailnet.
+                  '';
+                };
+                authKeyFile = lib.mkOption {
+                  type = lib.types.nullOr lib.types.path;
+                  default = null;
+                  description = ''
+                    Tailscale auth key for the first login. Without one, the service
+                    logs a URL to approve the machine (journalctl -u phonekeyd-<name>).
+                  '';
+                };
+              };
+              serve.httpsPort = lib.mkOption {
+                type = lib.types.nullOr lib.types.port;
+                default = null;
+                example = 8443;
+                description = ''
+                  Publish this instance through the host's tailscale serve on this
+                  HTTPS port (https://<host>.<tailnet>.ts.net:<port>), proxying to the
+                  instance's Unix socket. For instances without tailscale.hostname.
+                '';
+              };
+              address = lib.mkOption {
+                type = lib.types.nullOr lib.types.str;
+                default = null;
+                example = "127.0.0.1:8080";
+                description = ''
+                  Plain HTTP listener (host:port or unix:/path) instead of the
+                  default: /run/phonekeyd-<name>/http.sock without
+                  tailscale.hostname, nothing with it. The socket is open to the
+                  account and group phonekeyd-<name> only; a reverse proxy such as
+                  nginx gets access by joining that group. A TCP address is reachable
+                  by every account on the host.
+                '';
+              };
+              extraArgs = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ ];
+                example = [ "--max-grant" "30s" ];
+                description = "Extra arguments for `phonekeyd serve`.";
+              };
+            };
+          };
         in
         {
           options.services.phonekeyd = {
-            enable = lib.mkEnableOption "the phonekey backend";
             package = lib.mkOption {
               type = lib.types.package;
               default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
               description = "Package providing phonekeyd.";
             };
-            address = lib.mkOption {
-              type = lib.types.nullOr lib.types.str;
-              default = null;
-              example = "127.0.0.1:8080";
+            instances = lib.mkOption {
+              type = lib.types.attrsOf (lib.types.submodule instanceOptions);
+              default = { };
               description = ''
-                Plain HTTP listen address, for the host's `tailscale serve` or a
-                reverse proxy. By default phonekeyd listens on 127.0.0.1:8080, or
-                not at all when tailscale.hostname is set.
+                Backends to run, one per person. Each runs as its own system account
+                phonekeyd-<name>, with its state in /var/lib/phonekeyd/<name>.
               '';
-            };
-            vapidSubject = lib.mkOption {
-              type = lib.types.str;
-              example = "mailto:you@example.com";
-              description = "Contact for push services (a mailto: or https: URL).";
-            };
-            tailscale = {
-              hostname = lib.mkOption {
-                type = lib.types.nullOr lib.types.str;
-                default = null;
-                example = "phonekey";
-                description = ''
-                  Join the tailnet as this machine name and serve HTTPS at
-                  https://<hostname>.<tailnet>.ts.net (needs MagicDNS and HTTPS
-                  enabled for the tailnet). Independent of the host's own tailscaled.
-                '';
-              };
-              authKeyFile = lib.mkOption {
-                type = lib.types.nullOr lib.types.path;
-                default = null;
-                description = ''
-                  File with a Tailscale auth key for the first login. Without one,
-                  the service logs a URL to approve the machine
-                  (`journalctl -u phonekeyd`).
-                '';
-              };
-            };
-            extraArgs = lib.mkOption {
-              type = lib.types.listOf lib.types.str;
-              default = [ ];
-              example = [ "--max-grant" "30s" ];
-              description = "Extra arguments for `phonekeyd serve`.";
             };
           };
 
-          config = lib.mkIf cfg.enable {
-            users.users.phonekeyd = {
+          config = lib.mkIf (instances != { }) {
+            assertions = lib.concatLists (lib.mapAttrsToList (name: i: [
+              {
+                assertion = builtins.match "[a-z][a-z0-9-]{0,21}" name != null;
+                message = "services.phonekeyd.instances.${name}: names are lowercase letters, digits and dashes, at most 22 characters.";
+              }
+              {
+                assertion = i.serve.httpsPort == null || (i.tailscale.hostname == null && i.address == null);
+                message = "services.phonekeyd.instances.${name}: serve.httpsPort publishes the instance's Unix socket, so it can't be combined with tailscale.hostname or address.";
+              }
+              {
+                assertion = i.serve.httpsPort == null || config.services.tailscale.enable;
+                message = "services.phonekeyd.instances.${name}: serve.httpsPort needs services.tailscale.enable.";
+              }
+            ]) instances);
+
+            users.users = lib.mapAttrs' (name: _: lib.nameValuePair (user name) {
               isSystemUser = true;
-              group = "phonekeyd";
-              home = stateDir;
-            };
-            users.groups.phonekeyd = { };
+              group = user name;
+              home = stateDir name;
+            }) instances;
+            users.groups = lib.mapAttrs' (name: _: lib.nameValuePair (user name) { }) instances;
             environment.systemPackages = [ ctl ];
 
-            systemd.services.phonekeyd = {
-              description = "phonekey backend";
-              wantedBy = [ "multi-user.target" ];
-              wants = [ "network-online.target" ];
-              after = [ "network-online.target" ];
-              serviceConfig = {
-                ExecStart = lib.escapeShellArgs (
-                  [ (lib.getExe cfg.package) "--db" db "serve" "--vapid-subject" cfg.vapidSubject ]
-                  ++ lib.optionals (cfg.address != null) [ "--addr" cfg.address ]
-                  ++ lib.optionals (cfg.tailscale.hostname != null) [ "--tailscale-hostname" cfg.tailscale.hostname ]
-                  ++ lib.optionals (cfg.tailscale.authKeyFile != null) [ "--tailscale-authkey-file" "%d/tailscale-authkey" ]
-                  ++ cfg.extraArgs
-                );
-                LoadCredential = lib.optional (cfg.tailscale.authKeyFile != null) "tailscale-authkey:${cfg.tailscale.authKeyFile}";
-                User = "phonekeyd";
-                Group = "phonekeyd";
-                StateDirectory = "phonekeyd";
-                StateDirectoryMode = "0700";
-                Restart = "on-failure";
+            systemd.services = lib.mkMerge (lib.mapAttrsToList (name: i: {
+              ${user name} = {
+                description = "phonekey backend (${name})";
+                wantedBy = [ "multi-user.target" ];
+                wants = [ "network-online.target" ];
+                after = [ "network-online.target" ];
+                serviceConfig = {
+                  ExecStart = lib.escapeShellArgs (
+                    [ (lib.getExe cfg.package) "--db" "${stateDir name}/phonekey.db" "serve" "--vapid-subject" i.vapidSubject ]
+                    ++ lib.optionals (listen name i != null) [ "--addr" (listen name i) ]
+                    ++ lib.optionals (i.tailscale.hostname != null) [ "--tailscale-hostname" i.tailscale.hostname ]
+                    ++ lib.optionals (i.tailscale.authKeyFile != null) [ "--tailscale-authkey-file" "%d/tailscale-authkey" ]
+                    ++ i.extraArgs
+                  );
+                  LoadCredential = lib.optional (i.tailscale.authKeyFile != null) "tailscale-authkey:${i.tailscale.authKeyFile}";
+                  User = user name;
+                  Group = user name;
+                  StateDirectory = "phonekeyd/${name}";
+                  StateDirectoryMode = "0700";
+                  RuntimeDirectory = user name;
+                  RuntimeDirectoryMode = "0750";
+                  UMask = "0077";
+                  Restart = "on-failure";
 
-                NoNewPrivileges = true;
-                PrivateTmp = true;
-                PrivateDevices = true;
-                ProtectSystem = "strict";
-                ProtectHome = true;
-                ProtectKernelTunables = true;
-                ProtectKernelModules = true;
-                ProtectControlGroups = true;
-                RestrictNamespaces = true;
-                RestrictRealtime = true;
-                LockPersonality = true;
-                MemoryDenyWriteExecute = true;
-                SystemCallArchitectures = "native";
-                RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+                  # Other accounts on the host can't see or reach the process.
+                  ProtectProc = "invisible";
+                  ProcSubset = "pid";
+                  NoNewPrivileges = true;
+                  PrivateTmp = true;
+                  PrivateDevices = true;
+                  ProtectSystem = "strict";
+                  ProtectHome = true;
+                  ProtectKernelTunables = true;
+                  ProtectKernelModules = true;
+                  ProtectControlGroups = true;
+                  RestrictNamespaces = true;
+                  RestrictRealtime = true;
+                  LockPersonality = true;
+                  MemoryDenyWriteExecute = true;
+                  SystemCallArchitectures = "native";
+                  RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
+                };
               };
-            };
+              "${user name}-serve" = lib.mkIf (i.serve.httpsPort != null) {
+                description = "tailscale serve for phonekey (${name})";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "tailscaled.service" (user name + ".service") ];
+                wants = [ "tailscaled.service" ];
+                serviceConfig = {
+                  Type = "oneshot";
+                  RemainAfterExit = true;
+                  ExecStart = "${lib.getExe config.services.tailscale.package} serve --bg --https=${toString i.serve.httpsPort} unix:${socket name}";
+                  ExecStop = "${lib.getExe config.services.tailscale.package} serve --https=${toString i.serve.httpsPort} off";
+                };
+              };
+            }) instances);
           };
         };
 
