@@ -5,3 +5,4 @@ bin/
 .workspaces/
 result
 /tailscale/
+.direnv/
