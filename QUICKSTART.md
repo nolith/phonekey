@@ -115,7 +115,17 @@ That gives `you`:
   every host through the agent.
 
 These live in the system's ssh_config; your own `~/.ssh/config` still wins.
-Nothing needs `SSH_AUTH_SOCK`.
+
+How it fits together:
+- **Who asks the agent:** ssh (for github.com) and `phonekey-keygen` (which
+  git and jj run to sign) both ask phonekey-agent.
+- **What it does with the request:** it sends a phone key to the phone, and
+  your 1Password keys to the forwarded 1Password agent (`upstream`).
+- **Which key is asked for:** `~/.ssh/active.pub` decides.
+
+So nothing needs `SSH_AUTH_SOCK`. If you'd rather point `SSH_AUTH_SOCK` at
+phonekey-agent in your shell, that works too, and makes git's `gpg.ssh.program`
+line below unnecessary. See [README section 4](README.md#4-point-git-jj-and-ssh-at-it).
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/nixos#mydevbox
