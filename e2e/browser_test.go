@@ -339,7 +339,21 @@ func TestBrowser(t *testing.T) {
 				`[...document.querySelectorAll('#keys li')].find((li) => li.textContent.includes(%q)).querySelector('button').click()`, label)),
 		)
 	}
-	do(t, browser, chromedp.Navigate(url), chromedp.WaitVisible(chromedp.ID("requests")))
+	// The Reload button reloads the page (home-screen apps have no other way).
+	do(t, browser,
+		chromedp.Evaluate[chromedp.Void](`window.beforeReload = true`),
+		chromedp.Click(chromedp.ID("reload")),
+	)
+	reloaded := false
+	for i := 0; i < 50 && !reloaded; i++ {
+		time.Sleep(100 * time.Millisecond)
+		// Evaluating fails while the old page goes away; that's expected.
+		reloaded, _ = chromedp.Run(browser, chromedp.Evaluate[bool](`window.beforeReload === undefined && document.readyState === 'complete'`))
+	}
+	if !reloaded {
+		t.Fatal("Reload didn't reload the page")
+	}
+	do(t, browser, chromedp.WaitVisible(chromedp.ID("requests")))
 	if status := text(t, browser, "status"); status != "logged in with virtual authenticator" {
 		t.Fatalf("status %q", status)
 	}

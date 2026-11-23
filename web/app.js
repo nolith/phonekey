@@ -753,6 +753,7 @@ async function main() {
   action("grant-end", async () => endGrant());
   action("push-enable", enablePush);
   action("push-test", () => api("POST", "/api/web/push/test", {}));
+  action("reload", async () => location.reload());
   action("logout", async () => {
     await api("POST", "/api/web/logout", {});
     state.events?.close();
