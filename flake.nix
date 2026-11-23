@@ -365,21 +365,24 @@
                 example = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
                 description = "Names for `phonekey-use`, e.g. `phonekey-use desktop`.";
               };
-              ssh.identityAgent = lib.mkOption {
-                type = lib.types.bool;
-                default = true;
-                description = ''
-                  Point ssh at the agent (IdentityAgent, in the system ssh_config).
-                  The user's own ~/.ssh/config takes precedence, e.g.
-                  `IdentityAgent SSH_AUTH_SOCK` to use SSH_AUTH_SOCK instead.
-                '';
-              };
               ssh.github = lib.mkOption {
                 type = lib.types.bool;
                 default = false;
                 description = ''
-                  For github.com, use only ~/.ssh/active.pub (IdentityFile,
-                  IdentitiesOnly). IdentityFile adds to any the user sets.
+                  For github.com, use the agent and only the key ~/.ssh/active.pub
+                  points at (IdentityAgent, IdentityFile, IdentitiesOnly, in the
+                  system ssh_config). Other hosts are unaffected. The user's own
+                  ~/.ssh/config takes precedence; IdentityFile adds to any the user
+                  sets.
+                '';
+              };
+              ssh.identityAgent = lib.mkOption {
+                type = lib.types.bool;
+                default = false;
+                description = ''
+                  Point ssh at the agent for every host (IdentityAgent, in the
+                  system ssh_config), instead of the agent in SSH_AUTH_SOCK. The
+                  user's own ~/.ssh/config takes precedence.
                 '';
               };
             };
@@ -427,14 +430,17 @@
 
             users.users = lib.mapAttrs (name: u: { packages = [ cfg.package (use name u) ]; }) cfg.users;
 
+            # ssh uses the first value it finds for each setting, so a more
+            # specific block (github.com) has to come before a general one.
             programs.ssh.extraConfig = lib.concatStrings (lib.mapAttrsToList (name: u:
-              lib.optionalString u.ssh.identityAgent ''
-                Match localuser ${name}
-                  IdentityAgent /run/user/%i/phonekey-agent.sock
-              '' + lib.optionalString u.ssh.github ''
+              lib.optionalString u.ssh.github ''
                 Match localuser ${name} host github.com
+                  IdentityAgent /run/user/%i/phonekey-agent.sock
                   IdentityFile ~/.ssh/active.pub
                   IdentitiesOnly yes
+              '' + lib.optionalString u.ssh.identityAgent ''
+                Match localuser ${name}
+                  IdentityAgent /run/user/%i/phonekey-agent.sock
               '') cfg.users);
           };
         };

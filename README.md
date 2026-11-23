@@ -275,7 +275,8 @@ On NixOS, `phonekey.nixosModules.phonekey-agent` sets this up per user:
 that user:
 - the agent as a systemd user service
 - the binaries and a `phonekey-use` switching helper
-- ssh pointed at the agent
+- optionally, ssh using the agent for github.com only (`ssh.github`), or for
+  every host (`ssh.identityAgent`)
 
 The token goes in `~/.config/phonekey/token`; the service waits for it.
 [QUICKSTART.md](QUICKSTART.md) shows it in full.
@@ -303,7 +304,8 @@ $env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
 
 Alternatively, leave `SSH_AUTH_SOCK` alone:
 - **ssh:** `IdentityAgent $XDG_RUNTIME_DIR/phonekey-agent.sock` in
-  `~/.ssh/config` (the NixOS module does this).
+  `~/.ssh/config`, for the hosts that should use it (the NixOS module can do
+  this).
 - **git and jj:** sign through `phonekey-keygen` (below), which finds the
   agent's socket by itself.
 

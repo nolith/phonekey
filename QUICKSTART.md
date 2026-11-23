@@ -100,7 +100,7 @@ phonekey.nixosModules.phonekey-agent
     upstream = "$XDG_RUNTIME_DIR/op-agent.sock";
     # Names for `phonekey-use`.
     identities = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
-    # For github.com, sign in with ~/.ssh/active.pub only.
+    # For github.com, use the agent and the key ~/.ssh/active.pub points at.
     ssh.github = true;
   };
 }
@@ -109,9 +109,12 @@ phonekey.nixosModules.phonekey-agent
 That gives `you`:
 - the agent as a systemd user service
 - `phonekey-agent`, `phonekey-keygen` and `phonekey-use` in your `PATH`
-- ssh pointed at the agent (`IdentityAgent`, in the system's ssh_config; your
-  own `~/.ssh/config` still wins)
+- for github.com, ssh going through the agent with only the key
+  `~/.ssh/active.pub` points at. Every other host keeps your usual setup: your
+  `~/.ssh` keys and `SSH_AUTH_SOCK`. `ssh.identityAgent = true` would send
+  every host through the agent.
 
+These live in the system's ssh_config; your own `~/.ssh/config` still wins.
 Nothing needs `SSH_AUTH_SOCK`.
 
 ```sh
@@ -168,7 +171,7 @@ program = "phonekey-keygen"
 Signing a range is one command, so it's one approval: tap **Approve + rest of
 "jj sign …"** on the first commit, and the others are signed as they come in.
 
-ssh needs no config of your own: the module sets it up.
+ssh needs no config of your own for GitHub: the module sets it up.
 
 ## 5. Try it
 
