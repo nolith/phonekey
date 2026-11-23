@@ -20,6 +20,7 @@ import (
 
 	"tailscale.com/tsnet"
 
+	"phonekey/internal/protocol"
 	"phonekey/internal/server"
 	"phonekey/internal/store"
 )
@@ -271,7 +272,7 @@ func keys(ctx context.Context, st *store.Store, args []string) error {
 	if len(args) == 2 && args[0] == "rm" {
 		k, err := st.RemoveKey(ctx, args[1])
 		if err == nil {
-			fmt.Printf("removed %s (%s)\n", k.Label, k.Fingerprint)
+			fmt.Printf("removed %s (%s)\n", protocol.CleanLabel(k.Label), k.Fingerprint)
 		}
 		return err
 	}
@@ -280,7 +281,7 @@ func keys(ctx context.Context, st *store.Store, args []string) error {
 		return err
 	}
 	for _, k := range ks {
-		fmt.Printf("%s %s  # %s, %s, %d logins, %d with notifications\n", k.PublicKey, k.Label, k.Fingerprint,
+		fmt.Printf("%s %s  # %s, %s, %d logins, %d with notifications\n", k.PublicKey, protocol.CleanLabel(k.Label), k.Fingerprint,
 			time.Unix(k.CreatedAt, 0).Format(time.DateOnly), k.Logins, k.Notified)
 	}
 	return nil

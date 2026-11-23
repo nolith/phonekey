@@ -30,16 +30,34 @@ const VECTORS = [
   ],
 ];
 
-// Key constructors copy the seed so callers can wipe theirs.
+// Key constructors copy the seed so callers can wipe theirs. Each key has
+// wipe(), which zeroes its copy; it can't sign afterwards.
 
 async function nobleKey(seed) {
   seed = seed.slice();
   const pub = await noble.getPublicKeyAsync(seed);
-  return { impl: "noble", pub, sign: (data) => noble.signAsync(data, seed) };
+  let live = true;
+  return {
+    impl: "noble",
+    pub,
+    sign: (data) => {
+      if (!live) throw new Error("key was wiped");
+      return noble.signAsync(data, seed);
+    },
+    wipe: () => {
+      live = false;
+      seed.fill(0);
+    },
+  };
 }
 
 async function importWebCrypto(seed) {
-  return crypto.subtle.importKey("pkcs8", concat(PKCS8_PREFIX, seed), { name: "Ed25519" }, false, ["sign"]);
+  const pkcs8 = concat(PKCS8_PREFIX, seed);
+  try {
+    return await crypto.subtle.importKey("pkcs8", pkcs8, { name: "Ed25519" }, false, ["sign"]);
+  } finally {
+    pkcs8.fill(0);
+  }
 }
 
 async function webcryptoSign(key, data) {
@@ -49,11 +67,17 @@ async function webcryptoSign(key, data) {
 async function webcryptoKey(seed) {
   seed = seed.slice();
   const pub = await noble.getPublicKeyAsync(seed);
-  const key = await importWebCrypto(seed);
+  // The CryptoKey can't be zeroed; dropping the reference is all we can do.
+  let key = await importWebCrypto(seed);
   return {
     impl: "webcrypto",
     pub,
+    wipe: () => {
+      key = null;
+      seed.fill(0);
+    },
     sign: async (data) => {
+      if (!key) throw new Error("key was wiped");
       const sig = await webcryptoSign(key, data);
       if (await noble.verifyAsync(sig, data, pub)) return sig;
       console.warn("WebCrypto produced an invalid Ed25519 signature; using noble");

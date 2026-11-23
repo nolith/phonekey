@@ -159,6 +159,17 @@ async function unlock() {
   return key;
 }
 
+// approval signs a fresh nonce with a registered passkey (one Face ID), which
+// the server requires for adding and removing keys.
+async function approval() {
+  const key = await unlock();
+  try {
+    return { public_key: key.authorized, ...(await signedNonce(key)) };
+  } finally {
+    key.wipe();
+  }
+}
+
 async function signedNonce(key) {
   const { nonce } = await api("POST", "/api/web/nonce", {});
   const sig = await key.sign(enc.encode("phonekey-auth-v1\n" + nonce));
@@ -177,15 +188,22 @@ async function pair(create) {
   const code = $("pair-code").value.trim();
   const label = $("pair-label").value.trim() || "passkey";
   if (!code && !state.config.logged_in) throw new Error("Enter the pairing code from `phonekeyd pair-code`.");
+  // Without a code, a passkey that's already registered approves the new one.
+  const approved = code ? null : await approval();
   const { prf, credentialId } = create ? await createPRF(label) : await getPRF();
   const key = await keyFromPRF(prf);
-  await api("POST", "/api/web/pair", {
-    code,
-    label,
-    public_key: key.authorized,
-    credential_id: credentialId,
-    ...(await signedNonce(key)),
-  });
+  try {
+    await api("POST", "/api/web/pair", {
+      code,
+      label,
+      public_key: key.authorized,
+      credential_id: credentialId,
+      approval: approved,
+      ...(await signedNonce(key)),
+    });
+  } finally {
+    key.wipe();
+  }
   $("paired-key-text").textContent = key.authorized + " " + label.replace(/\s+/g, "_");
   await loadConfig();
   render();
@@ -195,7 +213,11 @@ async function pair(create) {
 
 async function login() {
   const key = await unlock();
-  await api("POST", "/api/web/login", { public_key: key.authorized, ...(await signedNonce(key)) });
+  try {
+    await api("POST", "/api/web/login", { public_key: key.authorized, ...(await signedNonce(key)) });
+  } finally {
+    key.wipe();
+  }
   await loadConfig();
   render();
 }
@@ -223,18 +245,25 @@ async function approve(withGrant) {
   const reqs = state.pending.filter((r) => state.selected.has(r.id));
   if (!reqs.length) return;
   const key = await unlock();
+  let granted = false;
   const errors = [];
-  for (const r of reqs) {
-    try {
-      await signRequest(r, key);
-      state.selected.delete(r.id);
-    } catch (e) {
-      errors.push(`${r.summary}: ${e.message}`);
+  try {
+    for (const r of reqs) {
+      try {
+        await signRequest(r, key);
+        state.selected.delete(r.id);
+      } catch (e) {
+        errors.push(`${r.summary}: ${e.message}`);
+      }
     }
-  }
-  const covered = reqs.filter(grantable);
-  if (withGrant && covered.length && !errors.length) {
-    startGrant(key, covered, grantSeconds(), reqs.map((r) => r.id));
+    // No grant if the user has already switched away: nobody would see it.
+    const covered = reqs.filter(grantable);
+    if (withGrant && covered.length && !errors.length && !document.hidden) {
+      startGrant(key, covered, grantSeconds(), reqs.map((r) => r.id));
+      granted = true;
+    }
+  } finally {
+    if (!granted) key.wipe();
   }
   if (errors.length) throw new Error(errors.join("\n"));
 }
@@ -266,7 +295,7 @@ function scopeProcess(r) {
 // grantable reports whether more requests could follow from the same
 // command. An ssh or ssh-keygen started on its own signs once and exits.
 function grantable(r) {
-  if (!r.context.scope || !state.config.max_grant_seconds) return false;
+  if (!r.context.scope || r.context.forwarded || !state.config.max_grant_seconds) return false;
   const top = scopeProcess(r);
   return !top || (top.command !== "ssh" && top.command !== "ssh-keygen");
 }
@@ -279,13 +308,19 @@ function shorten(s, n) {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
+// grantScope ties a grant to one dev box and one command on it.
+function grantScope(r) {
+  return `${r.devbox}\n${r.context.scope}`;
+}
+
 // done lists requests already signed, which the pending list may still show
 // until the next event arrives.
 function startGrant(key, reqs, seconds, done) {
   endGrant();
   const g = {
     key,
-    scopes: new Set(reqs.map((r) => r.context.scope)),
+    inflight: 0,
+    scopes: new Set(reqs.map(grantScope)),
     labels: [...new Set(reqs.map(commandLabel))],
     until: Date.now() + seconds * 1000,
     signed: [],
@@ -297,11 +332,14 @@ function startGrant(key, reqs, seconds, done) {
   runGrant();
 }
 
+// endGrant stops the grant; the key is wiped as soon as no signature that
+// was already under way still needs it.
 function endGrant() {
   const g = state.grant;
   if (!g) return;
   clearInterval(g.timer);
-  g.key = null;
+  g.ended = true;
+  if (!g.inflight) g.key.wipe();
   state.grant = null;
   renderGrant();
 }
@@ -310,15 +348,20 @@ async function runGrant() {
   const g = state.grant;
   if (!g) return;
   for (const r of state.pending) {
+    if (document.hidden) return endGrant();
     if (state.grant !== g || Date.now() >= g.until) return;
-    if (!g.scopes.has(r.context.scope) || g.busy.has(r.id) || signable(r, g.key)) continue;
+    if (r.context.forwarded || !g.scopes.has(grantScope(r)) || g.busy.has(r.id) || signable(r, g.key)) continue;
     g.busy.add(r.id);
+    g.inflight++;
     try {
       await signRequest(r, g.key, true);
       g.signed.push(r.summary);
       renderGrant();
     } catch (e) {
       setError(e);
+    } finally {
+      g.inflight--;
+      if (g.ended && !g.inflight) g.key.wipe();
     }
   }
 }
@@ -350,10 +393,12 @@ function connectEvents() {
     // Preselect arrivals only when nothing else was pending, so a request
     // that shows up while the user is about to approve another one isn't
     // swept into the same approval.
-    const nothingWasPending = !state.seen?.size;
-    for (const r of state.pending) {
-      if (!state.seen?.has(r.id) && (nothingWasPending || r.id === state.highlight)) state.selected.add(r.id);
-    }
+    // Preselect the request whose notification was tapped, or a request that
+    // arrived alone into an empty list. Never several at once.
+    const fresh = state.pending.filter((r) => !state.seen?.has(r.id));
+    const tapped = fresh.find((r) => r.id === state.highlight);
+    if (tapped) state.selected.add(tapped.id);
+    else if (!state.seen?.size && fresh.length === 1) state.selected.add(fresh[0].id);
     state.seen = ids;
     renderRequests();
     runGrant();
@@ -476,7 +521,7 @@ function renderContext(c) {
       ["Remote", c.remote],
       ["Server", sb && (sb.host_names?.length ? sb.host_names : "unknown host")],
       ["Server key", sb?.host_key_fingerprint],
-      ["Forwarded", sb?.forwarding ? "yes, via a forwarded agent" : null],
+      ["Forwarded", c.forwarded || sb?.forwarding ? "yes: asked through a forwarded agent, from another host" : null],
       ["Processes", chain],
     ]),
   ];
@@ -592,8 +637,9 @@ async function removeKey(k) {
   }
   if (k.current) lines.push("That includes this device: log in with another passkey afterwards.");
   lines.push("", "The passkey itself stays in your password manager, and the key on GitHub if you added it there.");
+  lines.push("", "You'll confirm with a passkey.");
   if (!confirm(lines.join("\n"))) return;
-  await api("DELETE", `/api/web/keys/${k.id}`);
+  await api("DELETE", `/api/web/keys/${k.id}`, { approval: await approval() });
   await loadConfig();
   if (!state.config.logged_in) {
     state.events?.close();
@@ -682,6 +728,7 @@ async function renderEnv() {
 async function diagDerive() {
   const { prf } = await getPRF();
   const key = await keyFromPRF(prf);
+  key.wipe();
   const out = $("diag-out");
   out.textContent = `${key.authorized}\n${key.fingerprint}\nimplementation: ${key.impl}`;
   out.hidden = false;
@@ -691,7 +738,12 @@ async function diagSign() {
   const { prf } = await getPRF();
   const key = await keyFromPRF(prf);
   const message = `phonekey test ${new Date().toISOString()}`;
-  const armored = await sshsigSign(key.sign, key.pub, enc.encode(message), "phonekey-test");
+  let armored;
+  try {
+    armored = await sshsigSign(key.sign, key.pub, enc.encode(message), "phonekey-test");
+  } finally {
+    key.wipe();
+  }
   const out = $("diag-out");
   out.textContent = [
     "# Verify on any machine with OpenSSH:",

@@ -119,3 +119,23 @@ func TestSessionBindPolicy(t *testing.T) {
 		t.Fatal("signed userauth for a forwarding-only binding")
 	}
 }
+
+// A request of any kind on a connection carrying a forwarding binding comes
+// from another host, whatever the local process details say.
+func TestForwardedContext(t *testing.T) {
+	host, _, _ := ed25519.GenerateKey(rand.Reader)
+	hostKey, _ := ssh.NewPublicKey(host)
+	c := &connAgent{a: New(Config{}), binds: []*sshwire.SessionBind{{HostKey: hostKey, SessionID: []byte("sid"), Forwarding: true}}}
+	sig := append([]byte("SSHSIG"), ssh.Marshal(struct {
+		NS, Reserved, Alg string
+		Hash              []byte
+	}{"git", "", "sha512", make([]byte, 64)})...)
+	rc, err := c.requestContext(sig)
+	if err != nil || !rc.Forwarded {
+		t.Fatalf("forwarded SSHSIG request: %+v, %v", rc, err)
+	}
+	c.binds[0].Forwarding = false
+	if rc, _ := c.requestContext(sig); rc.Forwarded {
+		t.Fatal("local request marked forwarded")
+	}
+}

@@ -2,7 +2,12 @@
 // and the simulator.
 package protocol
 
-import "phonekey/internal/sshwire"
+import (
+	"strings"
+	"unicode"
+
+	"phonekey/internal/sshwire"
+)
 
 // Request statuses.
 const (
@@ -26,7 +31,11 @@ type Context struct {
 	Action      string       `json:"action,omitempty"`
 	Remote      string       `json:"remote,omitempty"`
 	SessionBind *SessionBind `json:"session_bind,omitempty"`
-	GitObject   *GitObject   `json:"git_object,omitempty"`
+	// Forwarded is set when the request came over a connection the agent was
+	// forwarded on: something on another host is asking, and the process
+	// details are only those of the local ssh doing the forwarding.
+	Forwarded bool       `json:"forwarded,omitempty"`
+	GitObject *GitObject `json:"git_object,omitempty"`
 }
 
 type Process struct {
@@ -93,6 +102,18 @@ type WebRequest struct {
 	ExpiresAt   int64           `json:"expires_at"`
 }
 
+// CleanLabel drops control characters (which could otherwise reach an
+// admin's terminal through `phonekeyd keys`) and collapses whitespace.
+func CleanLabel(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // AuthMessage is what the page signs with the derived key to log in. The
 // prefix can never begin a userauth payload or an SSHSIG blob, and phonekeyd
 // refuses signing requests that are neither.
@@ -110,13 +131,29 @@ type LoginRequest struct {
 	Signature []byte `json:"signature"`
 }
 
+// Approval proves that a change to the registered keys comes from someone
+// holding a registered passkey right now, not just a session cookie: a
+// registered key's signature over AuthMessage(Nonce).
+type Approval struct {
+	PublicKey string `json:"public_key"`
+	Nonce     string `json:"nonce"`
+	Signature []byte `json:"signature"`
+}
+
+// PairRequest registers a key. It needs either a pairing code, or a
+// logged-in session plus an Approval.
 type PairRequest struct {
-	Code         string `json:"code"`
-	Label        string `json:"label"`
-	PublicKey    string `json:"public_key"`
-	CredentialID string `json:"credential_id,omitempty"` // base64url
-	Nonce        string `json:"nonce"`
-	Signature    []byte `json:"signature"`
+	Code         string    `json:"code"`
+	Label        string    `json:"label"`
+	PublicKey    string    `json:"public_key"`
+	CredentialID string    `json:"credential_id,omitempty"` // base64url
+	Nonce        string    `json:"nonce"`
+	Signature    []byte    `json:"signature"`
+	Approval     *Approval `json:"approval,omitempty"`
+}
+
+type RemoveKeyRequest struct {
+	Approval *Approval `json:"approval"`
 }
 
 type SignatureSubmission struct {

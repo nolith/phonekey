@@ -205,6 +205,33 @@ func TestWebAuth(t *testing.T) {
 		t.Fatal("pairing code reused")
 	}
 
+	// Logged in, a new key needs no code but an approval from a registered
+	// passkey; the session cookie alone isn't enough.
+	if err := other.Login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	newKey := sim.New(e.url, []byte("added while logged in, approved."))
+	nonce, sig := newKey.SignNonce(t, ctx, other)
+	if err := other.Post(ctx, "/api/web/pair", protocol.PairRequest{
+		Label: "unapproved", PublicKey: newKey.PublicKey(), Nonce: nonce, Signature: sig,
+	}, nil); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("pairing without approval: %v", err)
+	}
+	approval, err := other.Approval(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, sig = newKey.SignNonce(t, ctx, other)
+	if err := other.Post(ctx, "/api/web/pair", protocol.PairRequest{
+		Label: "approved\x1b]0;pwned\x07 key", PublicKey: newKey.PublicKey(), Nonce: nonce, Signature: sig, Approval: approval,
+	}, nil); err != nil {
+		t.Fatalf("pairing with approval: %v", err)
+	}
+	k, err := e.store.KeyByPublicKey(ctx, newKey.PublicKey())
+	if err != nil || k.Label != "approved ]0;pwned key" {
+		t.Fatalf("approved key: %+v, %v", k, err)
+	}
+
 	// Cross-site writes are refused.
 	req, _ := http.NewRequest(http.MethodPost, e.url+"/api/web/nonce", strings.NewReader("{}"))
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
@@ -407,8 +434,24 @@ func TestRemoveKey(t *testing.T) {
 		t.Fatalf("accidental key usage: %+v", target)
 	}
 
-	if err := e.phone.Delete(ctx, fmt.Sprintf("/api/web/keys/%d", target.ID)); err != nil {
+	// The removed key's open event stream must end with its session.
+	streamEnded := make(chan error, 1)
+	wctx, wcancel := context.WithCancel(ctx)
+	defer wcancel()
+	go func() { streamEnded <- other.Watch(wctx, func([]protocol.WebRequest) error { return nil }) }()
+	time.Sleep(200 * time.Millisecond)
+
+	// A session cookie alone can't remove keys.
+	if err := e.phone.Delete(ctx, fmt.Sprintf("/api/web/keys/%d", target.ID)); err == nil {
+		t.Fatal("removed a key without a passkey approval")
+	}
+	if err := e.phone.RemoveKey(ctx, target.ID); err != nil {
 		t.Fatal(err)
+	}
+	select {
+	case <-streamEnded:
+	case <-time.After(5 * time.Second):
+		t.Fatal("removed key's event stream is still open")
 	}
 	// Its login ended, its subscription is gone and its request was denied;
 	// this session is unaffected.
@@ -432,7 +475,7 @@ func TestRemoveKey(t *testing.T) {
 
 	// The last key stays.
 	cfg, _ = e.phone.Config(ctx)
-	if err := e.phone.Delete(ctx, fmt.Sprintf("/api/web/keys/%d", cfg.Keys[0].ID)); err == nil || !strings.Contains(err.Error(), "409") {
+	if err := e.phone.RemoveKey(ctx, cfg.Keys[0].ID); err == nil || !strings.Contains(err.Error(), "409") {
 		t.Fatalf("removing the last key: %v", err)
 	}
 }

@@ -258,18 +258,31 @@ func (c *connAgent) checkUserauth(u *sshwire.Userauth, chain []proc) (*protocol.
 	}, nil
 }
 
-func (c *connAgent) phoneSign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
+// requestContext describes a signature request for the approver, and
+// applies the session-bind policy to logins.
+func (c *connAgent) requestContext(data []byte) (protocol.Context, error) {
 	var chain []proc
 	if c.pid > 0 {
 		chain = processChain(c.pid)
 	}
 	rc := buildContext(c.a.cfg.Hostname, chain, data)
+	for _, b := range c.binds {
+		rc.Forwarded = rc.Forwarded || b.Forwarding
+	}
 	if u, err := sshwire.ParseUserauth(data); err == nil {
 		sb, err := c.checkUserauth(u, chain)
 		if err != nil {
-			return nil, err
+			return rc, err
 		}
 		rc.SessionBind = sb
+	}
+	return rc, nil
+}
+
+func (c *connAgent) phoneSign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
+	rc, err := c.requestContext(data)
+	if err != nil {
+		return nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(c.ctx, c.a.cfg.Deadline)

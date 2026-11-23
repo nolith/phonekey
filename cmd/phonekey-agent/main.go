@@ -26,11 +26,13 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	runtime := os.Getenv("XDG_RUNTIME_DIR")
-	if runtime == "" {
-		runtime = os.TempDir()
+	// No fallback to a shared directory like /tmp, where another account
+	// could create the socket path first.
+	defaultSocket := ""
+	if runtime := os.Getenv("XDG_RUNTIME_DIR"); runtime != "" {
+		defaultSocket = filepath.Join(runtime, "phonekey-agent.sock")
 	}
-	socket := flag.String("socket", envOr("PHONEKEY_SOCKET", filepath.Join(runtime, "phonekey-agent.sock")), "agent socket path ($PHONEKEY_SOCKET)")
+	socket := flag.String("socket", envOr("PHONEKEY_SOCKET", defaultSocket), "agent socket path (default $XDG_RUNTIME_DIR/phonekey-agent.sock) ($PHONEKEY_SOCKET)")
 	backendURL := flag.String("backend", os.Getenv("PHONEKEY_BACKEND"), "phonekeyd URL ($PHONEKEY_BACKEND)")
 	tokenFile := flag.String("token-file", os.Getenv("PHONEKEY_TOKEN_FILE"), "file holding the dev box token ($PHONEKEY_TOKEN_FILE; or set $PHONEKEY_TOKEN)")
 	keysFile := flag.String("keys", os.Getenv("PHONEKEY_KEYS"), "authorized_keys-format file of phone keys to offer (default: fetch from phonekeyd) ($PHONEKEY_KEYS)")
@@ -51,6 +53,9 @@ func main() {
 
 	if *backendURL == "" {
 		fatal(errors.New("--backend is required"))
+	}
+	if *socket == "" {
+		fatal(errors.New("no $XDG_RUNTIME_DIR: set --socket to a path in a directory only you can write to"))
 	}
 	token := os.Getenv("PHONEKEY_TOKEN")
 	if *tokenFile != "" {

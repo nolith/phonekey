@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"phonekey/internal/protocol"
 	"phonekey/internal/sshwire"
@@ -203,11 +204,18 @@ func signedGitObject(p proc, data []byte) *protocol.GitObject {
 	if !filepath.IsAbs(path) && p.cwd != "" {
 		path = filepath.Join(p.cwd, path)
 	}
-	f, err := os.Open(path)
+	// Only regular files: a FIFO or device would block the read.
+	if fi, err := os.Lstat(path); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return nil
+	}
 	content, err := io.ReadAll(io.LimitReader(f, 4<<20))
 	if err != nil {
 		return nil

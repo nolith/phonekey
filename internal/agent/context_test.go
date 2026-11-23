@@ -1,6 +1,10 @@
 package agent
 
 import (
+	"crypto/sha512"
+	"syscall"
+	"time"
+
 	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
@@ -8,6 +12,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"phonekey/internal/protocol"
 	"reflect"
 	"testing"
 
@@ -114,5 +119,27 @@ func TestHostNames(t *testing.T) {
 	unknownKey, _ := ssh.NewPublicKey(unknown)
 	if names, known := hostNames([]string{file}, unknownKey, nil); known || len(names) != 0 {
 		t.Fatalf("unknown key matched: %v", names)
+	}
+}
+
+func TestSignedGitObjectSkipsFIFO(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip(err)
+	}
+	h := sha512.Sum512(nil)
+	data := append([]byte("SSHSIG"), ssh.Marshal(struct {
+		NS, Reserved, Alg string
+		Hash              []byte
+	}{"git", "", "sha512", h[:]})...)
+	done := make(chan *protocol.GitObject)
+	go func() { done <- signedGitObject(proc{args: []string{"ssh-keygen", fifo}}, data) }()
+	select {
+	case g := <-done:
+		if g != nil {
+			t.Fatalf("parsed a FIFO: %+v", g)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO blocked")
 	}
 }

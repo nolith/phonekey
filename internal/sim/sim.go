@@ -113,6 +113,34 @@ func (p *Phone) Pair(ctx context.Context, code, label string) error {
 	}, nil)
 }
 
+// SignNonce gets a nonce through via's session and signs it with this
+// phone's key, for building web API requests by hand in tests.
+func (p *Phone) SignNonce(t interface{ Fatal(...any) }, ctx context.Context, via *Phone) (string, []byte) {
+	var n protocol.NonceResponse
+	if err := via.do(ctx, http.MethodPost, "/api/web/nonce", struct{}{}, &n); err != nil {
+		t.Fatal(err)
+	}
+	return n.Nonce, ed25519.Sign(p.Key, protocol.AuthMessage(n.Nonce))
+}
+
+// Approval signs a fresh nonce, approving a change to the registered keys.
+func (p *Phone) Approval(ctx context.Context) (*protocol.Approval, error) {
+	nonce, sig, err := p.signedNonce(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &protocol.Approval{PublicKey: p.PublicKey(), Nonce: nonce, Signature: sig}, nil
+}
+
+// RemoveKey removes a registered key, approved with this phone's key.
+func (p *Phone) RemoveKey(ctx context.Context, id int64) error {
+	a, err := p.Approval(ctx)
+	if err != nil {
+		return err
+	}
+	return p.do(ctx, http.MethodDelete, fmt.Sprintf("/api/web/keys/%d", id), protocol.RemoveKeyRequest{Approval: a}, nil)
+}
+
 func (p *Phone) Login(ctx context.Context) error {
 	nonce, sig, err := p.signedNonce(ctx)
 	if err != nil {

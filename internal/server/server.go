@@ -431,7 +431,7 @@ func (s *Server) devboxKeys(w http.ResponseWriter, r *http.Request, d *store.Dev
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for _, k := range keys {
-		fmt.Fprintf(w, "%s %s\n", k.PublicKey, strings.Join(strings.Fields(k.Label), "_"))
+		fmt.Fprintf(w, "%s %s\n", k.PublicKey, strings.ReplaceAll(protocol.CleanLabel(k.Label), " ", "_"))
 	}
 }
 
@@ -555,6 +555,24 @@ func (s *Server) checkAuth(r *http.Request, publicKey, nonce string, sig []byte)
 	return k, nil
 }
 
+// checkApproval requires a fresh signature from a registered key, so a
+// session cookie alone can't change which keys are registered.
+func (s *Server) checkApproval(r *http.Request, a *protocol.Approval) error {
+	if a == nil {
+		return errorf(http.StatusForbidden, "this needs approval with a registered passkey")
+	}
+	k, err := s.checkAuth(r, a.PublicKey, a.Nonce, a.Signature)
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.KeyByPublicKey(r.Context(), normalizeKey(k)); errors.Is(err, store.ErrNotFound) {
+		return errorf(http.StatusForbidden, "the approving key isn't registered")
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var req protocol.LoginRequest
 	if err := decode(r, &req); err != nil {
@@ -592,9 +610,14 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	// A logged-in session may add keys (e.g. a second passkey provider);
-	// otherwise a one-time code from `phonekeyd pair-code` is required.
-	if _, ok := s.sessionKeyID(r); !ok {
+	// A one-time code from `phonekeyd pair-code`, or a logged-in session
+	// approved with a registered passkey (e.g. adding a second provider).
+	if _, loggedIn := s.sessionKeyID(r); loggedIn && req.Code == "" {
+		if err := s.checkApproval(r, req.Approval); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+	} else {
 		ok, err := s.store.ConsumePairCode(r.Context(), req.Code)
 		if err != nil {
 			s.fail(w, r, err)
@@ -605,7 +628,7 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	label := strings.Join(strings.Fields(req.Label), " ")
+	label := protocol.CleanLabel(req.Label)
 	if label == "" {
 		label = "passkey"
 	}
@@ -624,6 +647,15 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) removeKey(w http.ResponseWriter, r *http.Request) {
+	var req protocol.RemoveKeyRequest
+	if err := decode(r, &req); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	if err := s.checkApproval(r, req.Approval); err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	k, err := s.store.RemoveKey(r.Context(), r.PathValue("id"))
 	if errors.Is(err, store.ErrLastKey) {
 		s.fail(w, r, errorf(http.StatusConflict, "%v", err))
@@ -640,6 +672,7 @@ func (s *Server) removeKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		s.store.DeleteSession(r.Context(), c.Value)
+		s.events.notify() // ends this session's event streams
 	}
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Path: "/", MaxAge: -1, HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
@@ -697,8 +730,17 @@ func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	heartbeat := time.NewTicker(20 * time.Second)
 	defer heartbeat.Stop()
+	// The session is checked again on every update and heartbeat, so a
+	// removed key, a logout or an expired session ends the stream.
+	live := func() bool {
+		_, ok := s.sessionKeyID(r)
+		return ok
+	}
 	for {
 		changed := s.events.wait()
+		if !live() {
+			return
+		}
 		reqs, err := s.pending(r.Context())
 		if err != nil {
 			return
@@ -720,6 +762,9 @@ func (s *Server) eventStream(w http.ResponseWriter, r *http.Request) {
 		case <-changed:
 		case <-expiry:
 		case <-heartbeat.C:
+			if !live() {
+				return
+			}
 			fmt.Fprint(w, ": ping\n\n")
 			flusher.Flush()
 			goto wait
@@ -738,6 +783,14 @@ func (s *Server) submitSignature(w http.ResponseWriter, r *http.Request) {
 	}
 	req, err := s.store.Request(r.Context(), id)
 	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	// The key may have been removed after the request was queued.
+	if _, err := s.store.KeyByPublicKey(r.Context(), req.PublicKey); errors.Is(err, store.ErrNotFound) {
+		s.fail(w, r, errorf(http.StatusConflict, "key %s was removed", req.Fingerprint))
+		return
+	} else if err != nil {
 		s.fail(w, r, err)
 		return
 	}
