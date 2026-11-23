@@ -8,13 +8,17 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"tailscale.com/tsnet"
 
 	"phonekey/internal/server"
 	"phonekey/internal/store"
@@ -51,7 +55,7 @@ func main() {
 
 	switch args[0] {
 	case "serve":
-		err = serve(ctx, st, args[1:])
+		err = serve(ctx, st, *dbPath, args[1:])
 	case "pair-code":
 		var code string
 		if code, err = st.NewPairCode(ctx, 10*time.Minute); err == nil {
@@ -70,9 +74,14 @@ func main() {
 	}
 }
 
-func serve(ctx context.Context, st *store.Store, args []string) error {
+func serve(ctx context.Context, st *store.Store, dbPath string, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", envOr("PHONEKEY_ADDR", "127.0.0.1:8080"), "listen address ($PHONEKEY_ADDR)")
+	addr := fs.String("addr", envOr("PHONEKEY_ADDR", "127.0.0.1:8080"), "plain HTTP listen address, empty to disable ($PHONEKEY_ADDR)")
+	tsHostname := fs.String("tailscale-hostname", os.Getenv("PHONEKEY_TS_HOSTNAME"),
+		"also join the tailnet as this machine name and serve HTTPS at https://NAME.<tailnet>.ts.net ($PHONEKEY_TS_HOSTNAME)")
+	tsDir := fs.String("tailscale-dir", "", "tailnet node state (default: tailscale/ next to the database)")
+	tsKeyFile := fs.String("tailscale-authkey-file", os.Getenv("PHONEKEY_TS_AUTHKEY_FILE"),
+		"Tailscale auth key for the first login; without one (or $TS_AUTHKEY) a login URL is logged ($PHONEKEY_TS_AUTHKEY_FILE)")
 	var cfg server.Config
 	fs.StringVar(&cfg.RPID, "rp-id", os.Getenv("PHONEKEY_RP_ID"), "WebAuthn RP ID (default: the page's hostname) ($PHONEKEY_RP_ID)")
 	fs.StringVar(&cfg.RPName, "rp-name", "phonekey", "WebAuthn RP display name")
@@ -107,18 +116,98 @@ func serve(ctx context.Context, st *store.Store, args []string) error {
 		return err
 	}
 	go srv.Sweep(ctx, 5*time.Second)
-	hs := &http.Server{Addr: *addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+
+	if *addr == "" && *tsHostname == "" {
+		return errors.New("nothing to listen on: set --addr or --tailscale-hostname")
+	}
+	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		hs.Shutdown(sctx)
 	}()
-	cfg.Logger.Info("listening", "addr", *addr)
-	if err := hs.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	errc := make(chan error, 2)
+	if *addr != "" {
+		ln, err := net.Listen("tcp", *addr)
+		if err != nil {
+			return err
+		}
+		cfg.Logger.Info("listening", "addr", *addr)
+		go func() { errc <- hs.Serve(ln) }()
+	}
+	if *tsHostname != "" {
+		dir := *tsDir
+		if dir == "" {
+			dir = filepath.Join(filepath.Dir(dbPath), "tailscale")
+		}
+		ln, err := listenTailnet(ctx, cfg.Logger, *tsHostname, dir, *tsKeyFile, *verbose)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("tailnet: %w", err)
+		}
+		go func() { errc <- hs.Serve(ln) }()
+	}
+	if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// listenTailnet joins the tailnet as its own machine (no root or tailscaled
+// configuration needed) and listens for HTTPS on port 443 with the
+// machine's *.ts.net certificate. The tailnet needs MagicDNS and HTTPS
+// certificates enabled. On first start it logs in with the auth key, or logs
+// a URL to approve the machine and waits.
+func listenTailnet(ctx context.Context, log *slog.Logger, hostname, dir, keyFile string, verbose bool) (net.Listener, error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	ts := &tsnet.Server{
+		Hostname: hostname,
+		Dir:      dir,
+		UserLogf: func(format string, args ...any) { log.Info("tailscale: " + fmt.Sprintf(format, args...)) },
+		Logf:     func(string, ...any) {},
+	}
+	if verbose {
+		ts.Logf = func(format string, args ...any) { log.Debug("tailscale: " + fmt.Sprintf(format, args...)) }
+	}
+	if keyFile != "" {
+		key, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, err
+		}
+		ts.AuthKey = strings.TrimSpace(string(key))
+	}
+	log.Info("joining the tailnet", "hostname", hostname, "state", dir)
+	// ListenTLS waits until the machine is logged in, which may take a
+	// person approving it, so don't let it hold up shutdown.
+	type result struct {
+		ln  net.Listener
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		ln, err := ts.ListenTLS("tcp", ":443")
+		done <- result{ln, err}
+	}()
+	var ln net.Listener
+	select {
+	case r := <-done:
+		if r.err != nil {
+			return nil, r.err
+		}
+		ln = r.ln
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	context.AfterFunc(ctx, func() { ts.Close() })
+	for _, d := range ts.CertDomains() {
+		log.Info("listening", "url", "https://"+d)
+	}
+	return ln, nil
 }
 
 func devbox(ctx context.Context, st *store.Store, args []string) error {
