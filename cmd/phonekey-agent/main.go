@@ -37,13 +37,18 @@ func main() {
 	tokenFile := flag.String("token-file", os.Getenv("PHONEKEY_TOKEN_FILE"), "file holding the dev box token ($PHONEKEY_TOKEN_FILE; or set $PHONEKEY_TOKEN)")
 	keysFile := flag.String("keys", os.Getenv("PHONEKEY_KEYS"), "authorized_keys-format file of phone keys to offer (default: fetch from phonekeyd) ($PHONEKEY_KEYS)")
 	deadline := flag.Duration("deadline", 90*time.Second, "how long to wait for an approval")
-	upstream := flag.String("upstream", "", "another agent socket whose keys to offer too (e.g. a forwarded 1Password agent)")
+	upstream := flag.String("upstream", os.Getenv("PHONEKEY_UPSTREAM"), "another agent socket whose keys to offer too, e.g. a forwarded 1Password agent ($PHONEKEY_UPSTREAM)")
 	requireBind := flag.Bool("require-session-bind", true, "refuse SSH logins not bound with session-bind@openssh.com")
 	requireKnown := flag.Bool("require-known-host", false, "refuse SSH logins to hosts not in known_hosts")
 	knownHosts := flag.String("known-hosts", filepath.Join(home, ".ssh/known_hosts")+",/etc/ssh/ssh_known_hosts",
 		"comma-separated known_hosts files used to name servers (read only)")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
+	// Paths may refer to $HOME or $XDG_RUNTIME_DIR, e.g. from a settings file
+	// shared by several users.
+	for _, p := range []*string{socket, tokenFile, keysFile, upstream} {
+		*p = os.ExpandEnv(*p)
+	}
 
 	level := slog.LevelInfo
 	if *verbose {

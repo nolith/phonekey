@@ -8,10 +8,20 @@
 // on stdout where jj expects the signature. Everything other than
 // `-Y sign` without a file argument is passed through unchanged.
 //
+// It also points ssh-keygen at phonekey-agent, so git and jj sign through
+// phonekey without SSH_AUTH_SOCK set in the environment: $PHONEKEY_SOCKET if
+// set (an empty value leaves SSH_AUTH_SOCK alone), otherwise
+// $XDG_RUNTIME_DIR/phonekey-agent.sock if the agent is listening there.
+//
 // jj config:
 //
 //	[signing.backends.ssh]
 //	program = "phonekey-keygen"
+//
+// git config (git passes a file, so only the socket part applies):
+//
+//	[gpg "ssh"]
+//	program = phonekey-keygen
 package main
 
 import (
@@ -28,6 +38,9 @@ func main() {
 	keygen := os.Getenv("PHONEKEY_SSH_KEYGEN")
 	if keygen == "" {
 		keygen = "ssh-keygen"
+	}
+	if s := agentSocket(); s != "" {
+		os.Setenv("SSH_AUTH_SOCK", s)
 	}
 	args := os.Args[1:]
 	if !signsStdin(args) {
@@ -57,6 +70,21 @@ func main() {
 		fail(err)
 	}
 	os.Stdout.Write(sig)
+}
+
+// agentSocket returns phonekey-agent's socket, or "" to leave
+// SSH_AUTH_SOCK as it is.
+func agentSocket() string {
+	if s, ok := os.LookupEnv("PHONEKEY_SOCKET"); ok {
+		return s
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		p := filepath.Join(dir, "phonekey-agent.sock")
+		if fi, err := os.Stat(p); err == nil && fi.Mode()&os.ModeSocket != 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 // signsStdin reports whether args ask ssh-keygen to sign stdin: "-Y sign"
