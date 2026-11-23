@@ -47,11 +47,13 @@
               description = "Package providing phonekeyd.";
             };
             address = lib.mkOption {
-              type = lib.types.str;
-              default = "127.0.0.1:8080";
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              example = "127.0.0.1:8080";
               description = ''
-                Plain HTTP listen address, for agents on this host, `tailscale serve`
-                or a reverse proxy. An empty string disables it.
+                Plain HTTP listen address, for the host's `tailscale serve` or a
+                reverse proxy. By default phonekeyd listens on 127.0.0.1:8080, or
+                not at all when tailscale.hostname is set.
               '';
             };
             vapidSubject = lib.mkOption {
@@ -104,7 +106,8 @@
               after = [ "network-online.target" ];
               serviceConfig = {
                 ExecStart = lib.escapeShellArgs (
-                  [ (lib.getExe cfg.package) "--db" db "serve" "--addr" cfg.address "--vapid-subject" cfg.vapidSubject ]
+                  [ (lib.getExe cfg.package) "--db" db "serve" "--vapid-subject" cfg.vapidSubject ]
+                  ++ lib.optionals (cfg.address != null) [ "--addr" cfg.address ]
                   ++ lib.optionals (cfg.tailscale.hostname != null) [ "--tailscale-hostname" cfg.tailscale.hostname ]
                   ++ lib.optionals (cfg.tailscale.authKeyFile != null) [ "--tailscale-authkey-file" "%d/tailscale-authkey" ]
                   ++ cfg.extraArgs

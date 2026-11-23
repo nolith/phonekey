@@ -77,7 +77,8 @@ func main() {
 
 func serve(ctx context.Context, st *store.Store, dbPath string, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	addr := fs.String("addr", envOr("PHONEKEY_ADDR", "127.0.0.1:8080"), "plain HTTP listen address, empty to disable ($PHONEKEY_ADDR)")
+	addr := fs.String("addr", os.Getenv("PHONEKEY_ADDR"),
+		"plain HTTP listen address (default 127.0.0.1:8080, or none with --tailscale-hostname) ($PHONEKEY_ADDR)")
 	tsHostname := fs.String("tailscale-hostname", os.Getenv("PHONEKEY_TS_HOSTNAME"),
 		"also join the tailnet as this machine name and serve HTTPS at https://NAME.<tailnet>.ts.net ($PHONEKEY_TS_HOSTNAME)")
 	tsDir := fs.String("tailscale-dir", "", "tailnet node state (default: tailscale/ next to the database)")
@@ -118,8 +119,10 @@ func serve(ctx context.Context, st *store.Store, dbPath string, args []string) e
 	}
 	go srv.Sweep(ctx, 5*time.Second)
 
+	// On its own tailnet machine phonekeyd is reachable only through the
+	// tailnet unless a plain listener is asked for explicitly.
 	if *addr == "" && *tsHostname == "" {
-		return errors.New("nothing to listen on: set --addr or --tailscale-hostname")
+		*addr = "127.0.0.1:8080"
 	}
 	hs := &http.Server{Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	go func() {

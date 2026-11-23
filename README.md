@@ -36,10 +36,62 @@ separate account: whoever controls it controls the page that handles your key
 (see [Threat model](#threat-model)). It needs a writable directory for its
 SQLite database.
 
-The phone needs a real HTTPS hostname. The simplest way to get one is your
-tailnet, so nothing is exposed to the internet. There are three ways to run it.
+The phone needs a real HTTPS hostname. phonekey gets one from your tailnet, so
+nothing is exposed to the internet. Pick one of two modes:
 
-**NixOS** (e.g. a small VPS): import the flake's module.
+| | **Own tailnet machine** (built in) | **The host's Tailscale** (`tailscale serve`) |
+| --- | --- | --- |
+| URL | `https://phonekey.<tailnet>.ts.net` | `https://<host>.<tailnet>.ts.net[:port]` |
+| Needs | nothing on the host; an auth key or one approval | root, or a Tailscale operator account, to configure `tailscale serve` |
+| Listens on the host | nothing: no TCP port, not even on 127.0.0.1 | `127.0.0.1:8080` (plain HTTP), which the host's tailscaled proxies to |
+| Who terminates TLS | phonekeyd itself (`tsnet`, the tailnet's certificate) | the host's tailscaled |
+| Hostname | its own, so it can move to another host | the host's |
+
+Both need MagicDNS and HTTPS certificates enabled for the tailnet (admin console
+→ DNS).
+
+#### Own tailnet machine
+
+phonekeyd joins the tailnet as its own machine through Tailscale's `tsnet`
+library, and serves HTTPS only there.
+
+```sh
+phonekeyd --db ~/phonekey/phonekey.db serve \
+  --tailscale-hostname phonekey --vapid-subject mailto:you@example.com
+```
+
+- **First login.** It uses an auth key (`--tailscale-authkey-file`, or
+  `$TS_AUTHKEY`). Without one, phonekeyd logs a login URL and waits for you to
+  approve the machine. The node state is kept in `tailscale/` next to the
+  database, so later starts don't need either.
+- **Key expiry.** Consider disabling key expiry for the machine in the admin
+  console, or it drops off the tailnet when its node key expires.
+- **No local listener.** There's no plain listener unless you add
+  `--addr 127.0.0.1:8080`. Agents, including one on the same host, use the
+  `https://phonekey.<tailnet>.ts.net` URL. That needs their host on the tailnet
+  itself.
+- **Admin commands** use the same database:
+  `phonekeyd --db ~/phonekey/phonekey.db pair-code`.
+
+#### The host's Tailscale
+
+phonekeyd serves plain HTTP on `127.0.0.1:8080` (change with `--addr`), and the
+host's tailscaled terminates TLS in front of it:
+
+```sh
+phonekeyd --db ~/phonekey/phonekey.db serve --vapid-subject mailto:you@example.com
+sudo tailscale serve --bg --https=8443 http://127.0.0.1:8080   # undo: sudo tailscale serve --https=8443 off
+```
+
+Any port works. 443 gives the shortest URL, if it's free on that host. The local
+listener is reachable by every account on the host. That doesn't bypass
+anything (the web API needs a session, the dev box API a token), but on a
+shared host the built-in mode exposes less.
+
+#### NixOS
+
+The flake's module runs either mode as a hardened system service, with the
+database in `/var/lib/phonekeyd`:
 
 ```nix
 # flake inputs: phonekey.url = "github:<you>/phonekey";
@@ -49,54 +101,31 @@ modules = [
     services.phonekeyd = {
       enable = true;
       vapidSubject = "mailto:you@example.com";
+      # Own tailnet machine:
       tailscale.hostname = "phonekey";                    # https://phonekey.<tailnet>.ts.net
-      tailscale.authKeyFile = "/run/secrets/ts-authkey";  # optional, see below
+      tailscale.authKeyFile = "/run/secrets/ts-authkey";  # optional; otherwise see journalctl -u phonekeyd
+      # Or, for the host's Tailscale, leave tailscale.* unset (phonekeyd then
+      # listens on 127.0.0.1:8080, see `address`) and run `tailscale serve` as above.
     };
   }
 ];
 ```
 
-Admin commands then run as root: `phonekeyd-ctl pair-code`,
+Admin commands run as root: `phonekeyd-ctl pair-code`,
 `phonekeyd-ctl devbox add <name>`, `phonekeyd-ctl keys`.
 
-**Any Linux account, no root needed**: phonekeyd joins the tailnet itself, as its
-own machine, through Tailscale's `tsnet` library.
+#### Either way
 
-```sh
-phonekeyd --db ~/phonekey/phonekey.db serve \
-  --tailscale-hostname phonekey --vapid-subject mailto:you@example.com
-```
-
-Admin commands use the same database:
-`phonekeyd --db ~/phonekey/phonekey.db pair-code`.
-
-**Behind an existing `tailscale serve`** (needs root or a Tailscale operator
-account on that host): run `phonekeyd serve` on its default `127.0.0.1:8080`,
-then `tailscale serve --bg http://127.0.0.1:8080`.
-
-Notes for the tailnet modes:
-
-- **Tailnet settings.** The tailnet needs MagicDNS and HTTPS certificates
-  enabled (admin console → DNS). Without them, phonekeyd says which one is
-  missing.
-- **First login.** It uses an auth key (`--tailscale-authkey-file`, or
-  `$TS_AUTHKEY`). Without one, phonekeyd logs a login URL and waits for you to
-  approve the machine. The node state is kept in `tailscale/` next to the
-  database, so later starts don't need either.
-- **Key expiry.** Consider disabling key expiry for the `phonekey` machine in the
-  admin console, or it drops off the tailnet when its node key expires.
-- **Local listener.** `--addr` (default `127.0.0.1:8080`) keeps a plain HTTP
-  listener alongside the tailnet one, for an agent on the same host. Set it to
-  `''` to turn it off.
-
-**Pick the hostname once.** The passkey, and so the derived SSH key, is bound to
-the page's hostname. Moving to a different hostname means a new passkey and new
-keys on GitHub. With `tailscale.hostname` the name stays the same wherever the
-backend runs, as long as the node state moves along. `--rp-id` can bind passkeys
-to a parent domain instead.
-
-**VAPID subject.** Push services need a contact address. Apple's push service
-rejects some placeholders, so use a real one.
+- **Pick the hostname once.** The passkey, and so the derived SSH key, is bound
+  to the page's hostname. A different hostname later means a new passkey and new
+  keys on GitHub.
+  - In the built-in mode the name stays the same wherever the backend runs, as
+    long as the node state moves along.
+  - With the host's Tailscale, the hostname is the host's.
+  - `--rp-id` can bind passkeys to a parent domain instead.
+- **VAPID subject.** Push services need a contact: a `mailto:` address or an
+  `https:` URL (the backend's own URL works). Apple's push service rejects some
+  placeholders.
 
 ### 2. Pair a passkey
 
