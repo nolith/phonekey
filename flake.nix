@@ -222,6 +222,8 @@
           };
         in
         {
+          # Imported once, even through both .default and .phonekeyd.
+          key = "phonekey/phonekeyd";
           options.services.phonekeyd = {
             package = lib.mkOption {
               type = lib.types.package;
@@ -346,8 +348,12 @@
       nixosModules.phonekey-agent = { config, lib, pkgs, ... }:
         let
           cfg = config.programs.phonekey-agent;
-          home = path: lib.replaceStrings [ "~/" ] [ "$HOME/" ] path;
-          # phonekey-use NAME|FILE points two links at public keys:
+          # A configured key path as a shell word, with ~/ meaning $HOME.
+          shellPath = path:
+            if lib.hasPrefix "~/" path then ''"$HOME"/${lib.escapeShellArg (lib.removePrefix "~/" path)}''
+            else lib.escapeShellArg path;
+          # phonekey-use NAME|FILE points two links at public keys (a name
+          # from identities, or one key file for both):
           # ~/.ssh/active.pub, which git and jj sign commits with, and
           # ~/.ssh/active_auth.pub, which ssh logs in with (ssh.hosts).
           use = name: u: pkgs.writeShellScriptBin "phonekey-use" ''
@@ -361,18 +367,20 @@
             }
             if [ $# -eq 0 ]; then
               show
-              echo "names: ${lib.concatStringsSep " " (lib.attrNames u.identities)}"
+              echo names: ${lib.escapeShellArg (lib.concatStringsSep " " (lib.attrNames u.identities))}
               exit 0
             fi
             case "$1" in
             ${lib.concatStrings (lib.mapAttrsToList (n: id: ''
-              ${n}) sign="${home id.sign}"; auth="${home id.auth}" ;;
+              ${lib.escapeShellArg n}) sign=${shellPath id.sign}; auth=${shellPath id.auth} ;;
             '') u.identities)}
-            *) sign="$1"; auth="$1" ;;
+            /*) sign="$1"; auth="$1" ;;
+            *) sign="$PWD/$1"; auth="$PWD/$1" ;;
             esac
             for k in "$sign" "$auth"; do
               if [ ! -e "$k" ]; then echo "phonekey-use: $k doesn't exist" >&2; exit 1; fi
             done
+            mkdir -p -m 700 "$HOME/.ssh"
             ln -sfn "$sign" "$sign_link"
             ln -sfn "$auth" "$auth_link"
             show
@@ -431,6 +439,8 @@
           };
         in
         {
+          # Imported once, even through both .default and .phonekey-agent.
+          key = "phonekey/phonekey-agent";
           options.programs.phonekey-agent = {
             package = lib.mkOption {
               type = lib.types.package;
