@@ -275,8 +275,7 @@ On NixOS, `phonekey.nixosModules.phonekey-agent` sets this up per user:
 that user:
 - the agent as a systemd user service
 - the binaries and a `phonekey-use` switching helper
-- optionally, ssh using the agent for github.com only (`ssh.github`), or for
-  every host (`ssh.identityAgent`)
+- ssh using the agent for chosen hosts (`ssh.hosts`, default `github.com`)
 
 The token goes in `~/.config/phonekey/token`; the service waits for it.
 [QUICKSTART.md](QUICKSTART.md) shows it in full.
@@ -317,8 +316,8 @@ All that's left is getting the tools to talk to phonekey-agent. Pick one:
 - **Leave `SSH_AUTH_SOCK` alone,** e.g. because it points at another agent, or
   because you can't set it per user (the NixOS module can't):
   - **ssh:** `IdentityAgent $XDG_RUNTIME_DIR/phonekey-agent.sock` in
-    `~/.ssh/config`, for the hosts that should use it. The NixOS module can
-    add this for github.com (`ssh.github`).
+    `~/.ssh/config`, for the hosts that should use it. The NixOS module adds
+    this for the hosts in `ssh.hosts`.
   - **git and jj:** sign through `phonekey-keygen` (below).
 
 `phonekey-keygen` stands in for `ssh-keygen`, which git and jj can be told to
@@ -373,18 +372,27 @@ To sign deliberately instead, drop the `[revsets]` part and run
 
 ```
 Host github.com
-  IdentityFile ~/.ssh/active.pub
+  IdentityFile ~/.ssh/active_auth.pub
   IdentitiesOnly yes
 ```
 
+`active_auth.pub` is a second link, for logins (`ln -sfn ~/.ssh/phonekey.pub
+~/.ssh/active_auth.pub`). With one key for both, it points at the same file as
+`active.pub`. A second link lets 1Password keep separate signing and login
+keys, so its prompt tells you which kind of request it is.
+
 **Switching between 1Password and the phone.** With `--upstream`, one agent
-offers both kinds of key. The tools above sign with whatever `active.pub`
-points at. With the NixOS module, `phonekey-use desktop` / `phonekey-use phone`
-switches between named keys. By hand:
+offers both kinds of key, and the links decide which is used. With the NixOS
+module, `phonekey-use desktop` / `phonekey-use phone` switches both links
+between named keys (`identities`: one key, or a `sign`/`auth` pair). By hand:
 
 ```sh
-ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub   # at the desk: 1Password approves
-ln -sfn ~/.ssh/phonekey.pub  ~/.ssh/active.pub   # away: phonekey approves on the phone
+# at the desk: 1Password approves
+ln -sfn ~/.ssh/op-github.pub      ~/.ssh/active.pub
+ln -sfn ~/.ssh/op-github_auth.pub ~/.ssh/active_auth.pub
+# away: phonekey approves on the phone
+ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub
+ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active_auth.pub
 ```
 
 - **The upstream socket.** A forwarded 1Password agent's socket only exists

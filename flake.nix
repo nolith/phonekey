@@ -319,33 +319,50 @@
         };
 
       # The dev box side: phonekey-agent as a systemd user service for the
-      # listed users, each with their own backend, plus ssh pointed at it. git
-      # and jj sign through phonekey-keygen, which finds the agent's socket by
-      # itself, so nothing needs SSH_AUTH_SOCK.
+      # listed users, each with their own backend, plus ssh pointed at it for
+      # chosen hosts. git and jj sign through phonekey-keygen, which finds the
+      # agent's socket by itself, so nothing needs SSH_AUTH_SOCK.
       nixosModules.phonekey-agent = { config, lib, pkgs, ... }:
         let
           cfg = config.programs.phonekey-agent;
           home = path: lib.replaceStrings [ "~/" ] [ "$HOME/" ] path;
-          # phonekey-use NAME|FILE points ~/.ssh/active.pub at a public key,
-          # which git, jj and ssh are configured to sign with.
+          # phonekey-use NAME|FILE points two links at public keys:
+          # ~/.ssh/active.pub, which git and jj sign commits with, and
+          # ~/.ssh/active_auth.pub, which ssh logs in with (ssh.hosts).
           use = name: u: pkgs.writeShellScriptBin "phonekey-use" ''
             set -eu
-            link="$HOME/.ssh/active.pub"
+            sign_link="$HOME/.ssh/active.pub"
+            auth_link="$HOME/.ssh/active_auth.pub"
+            show() {
+              for l in "$sign_link" "$auth_link"; do
+                if [ -L "$l" ]; then echo "$l -> $(readlink "$l")"; else echo "$l: not set"; fi
+              done
+            }
             if [ $# -eq 0 ]; then
-              if [ -L "$link" ]; then echo "active: $(readlink "$link")"; else echo "no $link yet"; fi
+              show
               echo "names: ${lib.concatStringsSep " " (lib.attrNames u.identities)}"
               exit 0
             fi
             case "$1" in
-            ${lib.concatStrings (lib.mapAttrsToList (n: path: ''
-              ${n}) key="${home path}" ;;
+            ${lib.concatStrings (lib.mapAttrsToList (n: id: ''
+              ${n}) sign="${home id.sign}"; auth="${home id.auth}" ;;
             '') u.identities)}
-            *) key="$1" ;;
+            *) sign="$1"; auth="$1" ;;
             esac
-            if [ ! -e "$key" ]; then echo "phonekey-use: $key doesn't exist" >&2; exit 1; fi
-            ln -sfn "$key" "$link"
-            echo "active: $key"
+            for k in "$sign" "$auth"; do
+              if [ ! -e "$k" ]; then echo "phonekey-use: $k doesn't exist" >&2; exit 1; fi
+            done
+            ln -sfn "$sign" "$sign_link"
+            ln -sfn "$auth" "$auth_link"
+            show
           '';
+          # A key for signing and logging in, or one key for both.
+          identity = lib.types.coercedTo lib.types.str (path: { sign = path; auth = path; }) (lib.types.submodule {
+            options = {
+              sign = lib.mkOption { type = lib.types.str; description = "Key git and jj sign commits with."; };
+              auth = lib.mkOption { type = lib.types.str; description = "Key ssh logs in with."; };
+            };
+          });
           userOptions = {
             options = {
               backend = lib.mkOption {
@@ -360,29 +377,31 @@
                 description = "Another agent whose keys to offer too, e.g. a forwarded 1Password agent.";
               };
               identities = lib.mkOption {
-                type = lib.types.attrsOf lib.types.str;
+                type = lib.types.attrsOf identity;
                 default = { phone = "~/.ssh/phonekey.pub"; };
-                example = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
-                description = "Names for `phonekey-use`, e.g. `phonekey-use desktop`.";
-              };
-              ssh.github = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
+                example = lib.literalExpression ''
+                  {
+                    phone = "~/.ssh/phonekey.pub";
+                    desktop = { sign = "~/.ssh/op-github.pub"; auth = "~/.ssh/op-github_auth.pub"; };
+                  }
+                '';
                 description = ''
-                  For github.com, use the agent and only the key ~/.ssh/active.pub
-                  points at (IdentityAgent, IdentityFile, IdentitiesOnly, in the
-                  system ssh_config). Other hosts are unaffected. The user's own
-                  ~/.ssh/config takes precedence; IdentityFile adds to any the user
-                  sets.
+                  Names for `phonekey-use`, e.g. `phonekey-use desktop`. Each is one
+                  key for both signing and logins, or a separate `sign` and `auth`
+                  key.
                 '';
               };
-              ssh.identityAgent = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
+              ssh.hosts = lib.mkOption {
+                type = lib.types.listOf lib.types.str;
+                default = [ "github.com" ];
+                example = [ "github.com" "git.example.com" ];
                 description = ''
-                  Point ssh at the agent for every host (IdentityAgent, in the
-                  system ssh_config), instead of the agent in SSH_AUTH_SOCK. The
-                  user's own ~/.ssh/config takes precedence.
+                  Hosts ssh reaches through the agent, logging in with only the key
+                  ~/.ssh/active_auth.pub points at (IdentityAgent, IdentityFile,
+                  IdentitiesOnly, in the system ssh_config). Other hosts keep the
+                  user's usual setup. The user's own ~/.ssh/config takes precedence;
+                  an IdentityFile there is tried before this one. To use the agent
+                  for every host, point SSH_AUTH_SOCK at it instead.
                 '';
               };
             };
@@ -430,17 +449,12 @@
 
             users.users = lib.mapAttrs (name: u: { packages = [ cfg.package (use name u) ]; }) cfg.users;
 
-            # ssh uses the first value it finds for each setting, so a more
-            # specific block (github.com) has to come before a general one.
             programs.ssh.extraConfig = lib.concatStrings (lib.mapAttrsToList (name: u:
-              lib.optionalString u.ssh.github ''
-                Match localuser ${name} host github.com
+              lib.optionalString (u.ssh.hosts != [ ]) ''
+                Match localuser ${name} host ${lib.concatStringsSep "," u.ssh.hosts}
                   IdentityAgent /run/user/%i/phonekey-agent.sock
-                  IdentityFile ~/.ssh/active.pub
+                  IdentityFile ~/.ssh/active_auth.pub
                   IdentitiesOnly yes
-              '' + lib.optionalString u.ssh.identityAgent ''
-                Match localuser ${name}
-                  IdentityAgent /run/user/%i/phonekey-agent.sock
               '') cfg.users);
           };
         };

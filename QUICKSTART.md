@@ -98,10 +98,13 @@ phonekey.nixosModules.phonekey-agent
     backend = "https://phonekey.YOURTAILNET.ts.net";
     # Also offer the keys of the forwarded 1Password agent, while it's connected.
     upstream = "$XDG_RUNTIME_DIR/op-agent.sock";
-    # Names for `phonekey-use`.
-    identities = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
-    # For github.com, use the agent and the key ~/.ssh/active.pub points at.
-    ssh.github = true;
+    # Names for `phonekey-use`: one key for both signing and logins, or a pair.
+    identities = {
+      phone = "~/.ssh/phonekey.pub";
+      desktop = { sign = "~/.ssh/op-github.pub"; auth = "~/.ssh/op-github_auth.pub"; };
+    };
+    # Hosts ssh reaches through the agent (the default).
+    ssh.hosts = [ "github.com" ];
   };
 }
 ```
@@ -109,10 +112,9 @@ phonekey.nixosModules.phonekey-agent
 That gives `you`:
 - the agent as a systemd user service
 - `phonekey-agent`, `phonekey-keygen` and `phonekey-use` in your `PATH`
-- for github.com, ssh going through the agent with only the key
-  `~/.ssh/active.pub` points at. Every other host keeps your usual setup: your
-  `~/.ssh` keys and `SSH_AUTH_SOCK`. `ssh.identityAgent = true` would send
-  every host through the agent.
+- for the hosts in `ssh.hosts`, ssh going through the agent, logging in with
+  only the key `~/.ssh/active_auth.pub` points at. Every other host keeps your
+  usual setup: your `~/.ssh` keys and `SSH_AUTH_SOCK`.
 
 These live in the system's ssh_config; your own `~/.ssh/config` still wins.
 
@@ -121,7 +123,9 @@ How it fits together:
   git and jj run to sign) both ask phonekey-agent.
 - **What it does with the request:** it sends a phone key to the phone, and
   your 1Password keys to the forwarded 1Password agent (`upstream`).
-- **Which key is asked for:** `~/.ssh/active.pub` decides.
+- **Which key is asked for:** two links decide. `~/.ssh/active.pub` is the key
+  git and jj sign with, and `~/.ssh/active_auth.pub` the key ssh logs in
+  with. `phonekey-use` sets both.
 
 So nothing needs `SSH_AUTH_SOCK`. If you'd rather point `SSH_AUTH_SOCK` at
 phonekey-agent in your shell, that works too, and makes git's `gpg.ssh.program`
@@ -159,11 +163,17 @@ A notification arrives on the phone. After you approve, the command prints a
 `phonekey-keygen` and agent that git and jj will use, and works the same in
 nushell.
 
-git, jj and ssh sign with whatever `~/.ssh/active.pub` points at. Switch with:
-- `phonekey-use phone`: approve on the phone
-- `phonekey-use desktop`: approve with 1Password; needs the forwarded agent,
-  see [below](#forwarding-1password)
-- `phonekey-use` on its own shows the current one
+git and jj sign with whatever `~/.ssh/active.pub` points at, and ssh logs in
+to GitHub with `~/.ssh/active_auth.pub`. Switch both with:
+- `phonekey-use phone`: approve on the phone, one key for both
+- `phonekey-use desktop`: approve with 1Password, with its separate signing and
+  login keys; needs the forwarded agent, see [below](#forwarding-1password)
+- `phonekey-use` on its own shows both links
+
+If your own `~/.ssh/config` has a `Host github.com` block with an
+`IdentityFile`, remove it: your own config wins, so ssh would try that key
+first. For ssh logins with the phone key, add it on GitHub as an
+*Authentication* key too.
 
 **git** (`~/.config/git/config`). `phonekey-keygen` finds the agent by itself:
 
@@ -224,8 +234,9 @@ needed unless the hostname changes.
 - **`Load key "….pub": bad permissions` / `Permission denied (publickey)`.** The
   agent ssh talks to doesn't have that key. Either the agent isn't running
   (`systemctl --user status phonekey-agent`), your own `~/.ssh/config` points
-  ssh at another agent, or `active.pub` points at the 1Password key while the
-  forwarded agent isn't connected.
+  ssh at another agent or another `IdentityFile`, or the links point at the
+  1Password keys while the forwarded agent isn't connected. GitHub also only
+  asks for a signature with a key registered there as an Authentication key.
 - **The agent doesn't start:** it waits for `~/.config/phonekey/token`. Check
   `systemctl --user status phonekey-agent`.
 - **No notification:** check **Send test** in the app, and that the request
