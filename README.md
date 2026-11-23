@@ -241,13 +241,20 @@ $env.SSH_AUTH_SOCK = $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock"  # nushell
 Alternatively, leave `SSH_AUTH_SOCK` alone and set `IdentityAgent` in
 `~/.ssh/config` for ssh. git and jj signing need the environment variable.
 
+Point the tools at a symlink rather than at the key itself, so that switching
+keys later (see below) is one command:
+
+```sh
+ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active.pub
+```
+
 **git**
 
 ```ini
 [gpg]
 	format = ssh
 [user]
-	signingkey = ~/.ssh/phonekey.pub
+	signingkey = ~/.ssh/active.pub
 ```
 
 **jj.** Sign when pushing, so one approval covers the push:
@@ -256,7 +263,7 @@ Alternatively, leave `SSH_AUTH_SOCK` alone and set `IdentityAgent` in
 [signing]
 behavior = "drop"                # don't sign on every rewrite...
 backend = "ssh"
-key = "~/.ssh/phonekey.pub"
+key = "~/.ssh/active.pub"
 
 [signing.backends.ssh]
 program = "phonekey-keygen"      # lets the phone show jj's commits
@@ -274,20 +281,26 @@ id. Signatures are identical either way.
 
 ```
 Host github.com
-  IdentityFile ~/.ssh/phonekey.pub
+  IdentityFile ~/.ssh/active.pub
   IdentitiesOnly yes
 ```
 
 **Switching between 1Password and the phone.** With `--upstream`, one agent
-offers both. Choose per tool by pointing the config above at a symlink, and
-switch it:
+offers both kinds of key. The tools above sign with whatever `active.pub`
+points at:
 
 ```sh
-ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub   # desktop: 1Password approves
-ln -sfn ~/.ssh/phonekey.pub  ~/.ssh/active.pub   # mobile: phonekey approves
+ln -sfn ~/.ssh/op-github.pub ~/.ssh/active.pub   # at the desk: 1Password approves
+ln -sfn ~/.ssh/phonekey.pub  ~/.ssh/active.pub   # away: phonekey approves on the phone
 ```
 
-The symlink is global to the machine. For per-shell switching, git can take
+- **The upstream socket.** A forwarded 1Password agent's socket only exists
+  while you're connected with agent forwarding. Without it, phonekey-agent
+  offers just the phone keys, and signing with `op-github.pub` fails until you
+  switch back.
+- **Testing.** Proxying to an upstream agent is tested with an ordinary
+  in-memory agent, not with 1Password's.
+- **Scope.** The symlink is global to the machine. For per-shell switching, git can take
 `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, and ssh expands
 environment variables in `IdentityFile`. jj has no per-key environment
 override; it needs a separate `JJ_CONFIG` or `--config`.
