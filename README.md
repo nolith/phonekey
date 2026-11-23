@@ -471,7 +471,7 @@ deletes resolved ones after `--retention` (7 days).
 | `web/vendor/noble-ed25519.js` | `@noble/ed25519` 3.2.0, unmodified (integrity hash in `web/vendor/README.md`) |
 | `internal/sim`, `cmd/phonekey-sim` | a fake approver for tests and manual testing (see [Development](#development)) |
 | `e2e/` | end-to-end tests (see [Development](#development)) |
-| `flake.nix` | the devshell, the package, and `nixosModules.default` (`services.phonekeyd.instances`) |
+| `flake.nix` | the devshell; packages `phonekeyd` (server) and `phonekey-agent` (agent and jj shim), `default` with both; `nixosModules.default` (`services.phonekeyd.instances`) |
 
 ### Backend API
 
@@ -756,7 +756,7 @@ nix flake check                # the unit tests in Nix's sandbox, with the packa
 | Path | Purpose | Keep? |
 | --- | --- | --- |
 | `internal/sim` | a fake approver: a Go client of the page's web API, with its key derived from a fixed secret instead of a passkey's PRF output. To the backend it looks exactly like the page in a browser on any device. | yes, it approves for the git, jj and cancel e2e tests and most server tests |
-| `cmd/phonekey-sim` | a command-line wrapper around `internal/sim`, for trying the dev box side by hand without a browser | can go; the real page now covers manual testing |
+| `cmd/phonekey-sim` | a command-line wrapper around `internal/sim`, for trying the dev box side by hand without a browser. Not in the Nix packages. | can go; the real page now covers manual testing |
 | `tools/genicons` | renders `web/icon-*.png` from the same shapes as `web/icon.svg`; run once | can go; the PNGs stay |
 | `e2e/` | the end-to-end tests | yes |
 
@@ -808,5 +808,3 @@ bin/phonekey-sim watch --ask
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
 - **An agent module.** NixOS or home-manager, for the dev box side.
-- **Leaner packages.** The package builds all four binaries; separate server
-  and agent packages would keep the server and the sim off dev boxes.

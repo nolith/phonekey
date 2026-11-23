@@ -7,21 +7,38 @@
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
+      # One Go build of some of the module's packages; they all share the
+      # source and the vendored modules.
+      goBuild = pkgs: { pname, subPackages, mainProgram ? null, doCheck ? false }: pkgs.buildGoModule {
+        inherit pname subPackages doCheck;
+        version = "0.1.0";
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./web ];
+        };
+        vendorHash = "sha256-jR72jh6BY9G5zVY1s5pPlv+4xiUprdBn16HwSipkv/Q=";
+        env.CGO_ENABLED = "0";
+        ldflags = [ "-s" "-w" ];
+        meta = pkgs.lib.optionalAttrs (mainProgram != null) { inherit mainProgram; };
+      };
     in
     {
-      packages = forAll (pkgs: {
-        default = pkgs.buildGoModule {
-          pname = "phonekey";
-          version = "0.1.0";
-          src = pkgs.lib.fileset.toSource {
-            root = ./.;
-            fileset = pkgs.lib.fileset.unions [ ./go.mod ./go.sum ./cmd ./internal ./web ];
-          };
-          vendorHash = "sha256-jR72jh6BY9G5zVY1s5pPlv+4xiUprdBn16HwSipkv/Q=";
-          subPackages = [ "cmd/phonekeyd" "cmd/phonekey-agent" "cmd/phonekey-keygen" "cmd/phonekey-sim" ];
-          env.CGO_ENABLED = "0";
-          ldflags = [ "-s" "-w" ];
-          meta.mainProgram = "phonekeyd";
+      packages = forAll (pkgs: rec {
+        # The backend, for the host that serves phonekey.
+        phonekeyd = goBuild pkgs {
+          pname = "phonekeyd";
+          subPackages = [ "cmd/phonekeyd" ];
+          mainProgram = "phonekeyd";
+        };
+        # The dev box side: the agent, and the ssh-keygen shim for jj.
+        phonekey-agent = goBuild pkgs {
+          pname = "phonekey-agent";
+          subPackages = [ "cmd/phonekey-agent" "cmd/phonekey-keygen" ];
+          mainProgram = "phonekey-agent";
+        };
+        default = pkgs.symlinkJoin {
+          name = "phonekey";
+          paths = [ phonekeyd phonekey-agent ];
         };
       });
 
@@ -29,8 +46,8 @@
       # toolchain and vendored modules. The e2e tests need Docker and a
       # browser, so they run outside Nix: go test -tags e2e ./e2e
       checks = forAll (pkgs: {
-        tests = self.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs {
-          name = "phonekey-tests";
+        tests = goBuild pkgs {
+          pname = "phonekey-tests";
           subPackages = [ "internal/..." ];
           doCheck = true;
         };
@@ -195,7 +212,7 @@
           options.services.phonekeyd = {
             package = lib.mkOption {
               type = lib.types.package;
-              default = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+              default = self.packages.${pkgs.stdenv.hostPlatform.system}.phonekeyd;
               description = "Package providing phonekeyd.";
             };
             instances = lib.mkOption {
