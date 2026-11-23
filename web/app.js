@@ -438,6 +438,14 @@ async function closeNotifications(live) {
 
 // Push
 
+// forThisServer reports whether a push subscription was made with this
+// backend's VAPID key. One made for an earlier backend under the same hostname
+// can't receive its pushes.
+function forThisServer(sub) {
+  const key = sub.options.applicationServerKey;
+  return key !== null && b64url(new Uint8Array(key)) === b64url(fromB64url(state.config.vapid_public_key));
+}
+
 async function enablePush() {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
     throw new Error("Push isn't available here. On iOS, add phonekey to the Home Screen and open it from there.");
@@ -446,6 +454,10 @@ async function enablePush() {
   if (perm !== "granted") throw new Error(`Notification permission: ${perm}`);
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
+  if (sub && !forThisServer(sub)) {
+    await sub.unsubscribe();
+    sub = null;
+  }
   if (!sub) {
     sub = await reg.pushManager.subscribe({
       userVisibleOnly: true,
@@ -463,7 +475,7 @@ async function enablePush() {
 async function claimPushSubscription() {
   if (!("serviceWorker" in navigator) || typeof Notification === "undefined" || Notification.permission !== "granted") return;
   const sub = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
-  if (sub) await api("POST", "/api/web/push/subscribe", sub.toJSON());
+  if (sub && forThisServer(sub)) await api("POST", "/api/web/push/subscribe", sub.toJSON());
 }
 
 async function renderPushState() {
@@ -471,7 +483,10 @@ async function renderPushState() {
   if ("serviceWorker" in navigator && "PushManager" in window) {
     const reg = await navigator.serviceWorker.getRegistration();
     const sub = await reg?.pushManager.getSubscription();
-    s = `Permission: ${Notification.permission}. ${sub ? "Subscribed on this device." : "Not subscribed on this device."}`;
+    const subscribed = !sub ? "Not subscribed on this device."
+      : forThisServer(sub) ? "Subscribed on this device."
+      : "Subscribed for a previous server; enable notifications again.";
+    s = `Permission: ${Notification.permission}. ${subscribed}`;
   }
   $("push-state").textContent = s;
 }
