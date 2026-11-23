@@ -214,10 +214,20 @@ key = "~/.ssh/active.pub"
 
 [signing.backends.ssh]
 program = "phonekey-keygen"
+allowed-signers = "~/.ssh/allowed_signers"
 ```
 
 Signing a range is one command, so it's one approval: tap **Approve + rest of
 "jj sign …"** on the first commit, and the others are signed as they come in.
+
+`allowed-signers` is only for showing signatures as good in `jj log`. List the
+phone key there with your commit email, next to any older keys you signed with:
+
+```nu
+$"you@example.com (open ~/.ssh/phonekey.pub | str trim)\n" | save --append ~/.ssh/allowed_signers
+```
+
+For git, the same file is `gpg.ssh.allowedSignersFile`.
 
 ssh needs no config of your own for GitHub: the module sets it up.
 
