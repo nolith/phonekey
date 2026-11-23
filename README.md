@@ -370,7 +370,7 @@ deletes resolved ones after `--retention` (7 days).
 | `web/ed25519.js`, `web/sshsig.js` | key derivation and signing; SSH wire encoding and SSHSIG armor |
 | `web/sw.js` | the service worker: shows a notification for every push, opens the request on click |
 | `web/vendor/noble-ed25519.js` | `@noble/ed25519` 3.2.0, unmodified (integrity hash in `web/vendor/README.md`) |
-| `internal/sim`, `cmd/phonekey-sim` | a stand-in phone that uses the web API with a key from a fixed secret |
+| `internal/sim`, `cmd/phonekey-sim` | a fake approver for tests and manual testing (see [Development](#development)) |
 | `e2e/` | end-to-end tests (see [Development](#development)) |
 | `flake.nix` | the devshell, the package, and `nixosModules.default` |
 
@@ -535,7 +535,7 @@ phonekey-keygen uses only the standard library.
 | --- | --- | --- |
 | `golang.org/x/crypto`, `golang.org/x/sys` | SSH key and signature parsing | |
 | `modernc.org/sqlite` | the database; SQLite translated to pure Go (no cgo) | `modernc.org/libc`, `mathutil`, `memory`; `remyoudompheng/bigfft`, `dustin/go-humanize`, `google/uuid` |
-| `github.com/SherClockHolmes/webpush-go` | Web Push: payload encryption (RFC 8291) and VAPID tokens | `golang-jwt/jwt/v5` |
+| `github.com/SherClockHolmes/webpush-go` | Web Push. A push is one HTTPS POST to the subscription's endpoint (Apple's or Google's push service), plus two pieces of cryptography: a VAPID token signed with phonekeyd's P-256 key, which proves the sender to the push service, and the payload encrypted to the subscription's key (RFC 8291), so the push service can't read it | `golang-jwt/jwt/v5` |
 | `tailscale.com` (`tsnet`) | only for `--tailscale-hostname` | about 35 more modules: `wireguard-go`, gVisor's netstack, `x/net`, `klauspost/compress`, … |
 
 Without `tsnet`, phonekeyd builds from 11 modules; with it, from 45. `go version -m
@@ -576,7 +576,7 @@ nix build                      # the package
 `JJ_CONFIG` and explicit ssh options, so the host's own setup is never touched:
 
 - **`TestGit`, `TestJJ`, `TestCancelAndDeadline`** use OpenSSH, git and jj
-  against a throwaway sshd container (`e2e/sshd`), with the simulator approving.
+  against a throwaway sshd container (`e2e/sshd`), with `internal/sim` approving.
   They cover:
   - clone, signed commit and tag, push and deny
   - the shared scope of a 3-commit `git rebase -S`
@@ -596,8 +596,17 @@ nix build                      # the package
 
   `PHONEKEY_SCREENSHOTS=dir` saves phone-sized screenshots.
 
-To try the dev box side without a phone, `phonekey-sim` pairs with a key derived
-from `--secret` and approves (or asks y/N with `--ask`):
+**Development-only code.**
+
+| Path | Purpose | Keep? |
+| --- | --- | --- |
+| `internal/sim` | a fake approver: a Go client of the page's web API, with its key derived from a fixed secret instead of a passkey's PRF output. To the backend it looks exactly like the page in a browser on any device. | yes, it approves for the git, jj and cancel e2e tests and most server tests |
+| `cmd/phonekey-sim` | a command-line wrapper around `internal/sim`, for trying the dev box side by hand without a browser | can go; the real page now covers manual testing |
+| `tools/genicons` | renders `web/icon-*.png` from the same shapes as `web/icon.svg`; run once | can go; the PNGs stay |
+| `e2e/` | the end-to-end tests | yes |
+
+`phonekey-sim` pairs with a key derived from `--secret` and approves (or asks y/N
+with `--ask`):
 
 ```sh
 export PHONEKEY_DB=/tmp/phonekey.db
