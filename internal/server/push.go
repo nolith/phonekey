@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
@@ -66,7 +67,8 @@ func (p *pusher) send(ctx context.Context, msg PushMessage) {
 		sctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		resp, err := webpush.SendNotificationWithContext(sctx, payload, &s, &webpush.Options{
 			HTTPClient:      p.client,
-			Subscriber:      p.subject,
+			// webpush-go adds "mailto:" to anything that isn't an https: URL.
+			Subscriber:      strings.TrimPrefix(p.subject, "mailto:"),
 			VAPIDPublicKey:  p.public,
 			VAPIDPrivateKey: p.private,
 			TTL:             120,

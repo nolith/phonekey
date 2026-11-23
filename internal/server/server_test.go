@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha512"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -270,7 +271,7 @@ func TestEventsAndPush(t *testing.T) {
 	}))
 	defer pushSrv.Close()
 
-	e := setup(t, server.Config{PushClient: pushSrv.Client()})
+	e := setup(t, server.Config{PushClient: pushSrv.Client(), VAPIDSubject: "mailto:you@example.com"})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -317,8 +318,28 @@ func TestEventsAndPush(t *testing.T) {
 			mu.Lock()
 			p := pushes[0]
 			mu.Unlock()
-			if !strings.HasPrefix(p.Header.Get("Authorization"), "vapid t=") || p.Header.Get("Content-Encoding") != "aes128gcm" {
+			auth := p.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "vapid t=") || p.Header.Get("Content-Encoding") != "aes128gcm" {
 				t.Fatalf("push missing VAPID/encryption headers: %v", p.Header)
+			}
+			// Apple rejects the push (403 BadJwtToken) unless sub is a
+			// single mailto: or https: URL. webpush-go adds "mailto:" itself,
+			// which turned a configured mailto: subject into "mailto:mailto:…".
+			jwt, _, _ := strings.Cut(strings.TrimPrefix(auth, "vapid t="), ",")
+			parts := strings.Split(jwt, ".")
+			if len(parts) != 3 {
+				t.Fatalf("VAPID token isn't a JWT: %q", jwt)
+			}
+			payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var claims struct{ Sub string }
+			if err := json.Unmarshal(payload, &claims); err != nil {
+				t.Fatal(err)
+			}
+			if claims.Sub != "mailto:you@example.com" {
+				t.Fatalf("VAPID sub = %q, want mailto:you@example.com", claims.Sub)
 			}
 			return
 		}
