@@ -30,20 +30,6 @@ being signed, approve with Face ID, and the page derives an ordinary
 private key is stored anywhere: not on the dev box, not on the backend, not in a
 vault.
 
-Tested so far:
-
-- **Automated:** the dev box side, the backend and the page are tested end to
-  end (see [Development](#development)).
-- **Desktop by hand:** Chrome on macOS, pairing and push.
-- **iPhone by hand**, in the home-screen app, with passkeys in both 1Password
-  and iCloud Keychain:
-  - PRF works with both
-  - push notifications arrive
-  - a `jj sign` over a range of commits works with one approval and a grant,
-    and jj verifies the signatures
-- **Not tried yet:** GitHub; the same passkey on a second device; the NixOS
-  module on a real host.
-
 - [Setting up](#setting-up)
 - [Using it](#using-it)
 - [How it works](#how-it-works)
@@ -199,10 +185,7 @@ modules = [
     `ipAddressAllow`. With a TCP `address`, this network restriction is left
     out so connections can come in.
 
-  `systemd-analyze security` rates each instance 1.1 ("OK"). The units come from
-  evaluating the module, and the binary was run under the same restrictions as
-  a user service, in both modes. IP filtering can only be verified on a real
-  host: a user's systemd can't enforce it.
+  `systemd-analyze security` rates each instance 1.1 ("OK").
 
 #### Either way
 
@@ -217,6 +200,10 @@ modules = [
   placeholders.
 
 ### 2. Pair a passkey
+
+Works on the iPhone as a home-screen app, with passkeys in iCloud Keychain or
+1Password, and in desktop browsers whose passkey provider supports the PRF
+extension.
 
 On the backend host, get a one-time code (valid 10 minutes):
 
@@ -359,8 +346,6 @@ ln -sfn ~/.ssh/phonekey.pub  ~/.ssh/active.pub   # away: phonekey approves on th
   while you're connected with agent forwarding. Without it, phonekey-agent
   offers just the phone keys, and signing with `op-github.pub` fails until you
   switch back.
-- **Testing.** Proxying to an upstream agent is tested with an ordinary
-  in-memory agent, not with 1Password's.
 - **Scope.** The symlink is global to the machine. For per-shell switching, git can take
 `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, and ssh expands
 environment variables in `IdentityFile`. jj has no per-key environment
@@ -407,6 +392,10 @@ override; it needs a separate `JJ_CONFIG` or `--config`.
   - The passkey itself stays in your password manager, and the key on GitHub
     if you added it there; remove those separately.
   - `phonekeyd keys rm` does the same from the command line.
+- **Logins per command.** `jj git clone` logs in twice, so it asks twice
+  unless you use *Approve + rest*.
+- **Agent log.** A refused signature shows up twice in the agent's log: once
+  from phonekey-agent, once as `agent 13: …` from Go's ssh-agent library.
 - **Diagnostics** checks PRF and Ed25519 support, derives and shows the key
   (should match on every device), and signs a test message. It prints a
   snippet that verifies the signature with `ssh-keygen -Y verify`.
@@ -564,6 +553,8 @@ deletes resolved ones after `--retention` (7 days).
 - **No build step.** The page is plain ES modules with no framework and no
   third-party code apart from the vendored noble. All DOM is built with a small
   helper that only creates text nodes, never HTML strings.
+- **Notifications** don't set `requireInteraction`: macOS Chrome only shows
+  those if they're allowed as "alerts".
 - **Live updates.** The page keeps an EventSource open. Browsers give up
   reconnecting after an HTTP error such as a proxy's 502, so the page
   reconnects by itself.
@@ -779,23 +770,17 @@ PHONEKEY_TOKEN=$(bin/phonekeyd devbox add test) bin/phonekey-agent --backend htt
 bin/phonekey-sim watch --ask
 ```
 
-Things found while testing:
-- `jj git clone` logs in twice.
-- macOS Chrome doesn't display notifications that set `requireInteraction`
-  unless they're allowed as "alerts", so the service worker doesn't set it.
-- x/crypto's agent server logs refused signatures to stderr itself
-  (`agent 13: …`), next to phonekey-agent's own log line.
-
 ## Open questions and future work
 
 - **GitHub.** How long it waits during an SSH login decides the agent's
   `--deadline`. Not measured.
-- **The NixOS module on a real host.** The units evaluate and score well, and
-  the binary runs under the same restrictions as a user service. But IP
-  filtering, `PrivateUsers`, the dedicated accounts, `phonekeyd-ctl` and the
-  `tailscale serve` helper have only run in that partial form. A
-  `runNixOSTest` VM test would check all of it repeatedly; it needs KVM, e.g. in
-  CI (GitHub's Linux runners have it).
+- **The NixOS module on a real host.** The binary has run under the module's
+  restrictions as a user service, but IP filtering, `PrivateUsers`, the
+  dedicated accounts, `phonekeyd-ctl` and the `tailscale serve` helper need the
+  system service manager. A `runNixOSTest` VM test would check all of it
+  repeatedly; it needs KVM, e.g. in CI (GitHub's Linux runners have it).
+- **1Password as the upstream agent.** Proxying is tested with an ordinary
+  in-memory agent, not with 1Password's.
 - **Showing a range before approving.** A grant signs commits you only see
   afterwards. For `jj sign -r X`, the agent knows the command line and its
   working directory. It could run `jj log -r X --ignore-working-copy` there and
