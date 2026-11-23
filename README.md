@@ -847,15 +847,6 @@ bin/phonekey-sim watch --ask
   - The list could differ from what's actually signed, e.g. when jj skips
     commits that are already signed.
   - Like all dev box context, it's unverified.
-- **Checkboxes or per-card buttons.** Multi-select only helps when unrelated
-  requests are pending at once. Per-card buttons would be simpler.
-- **Rate limits.** `/api/web/nonce` needs no login, and every queued request
-  sends a push, so a device on the tailnet (or a dev box token) could fill the
-  nonce table or spam notifications.
-- **A list of logins.** Showing each logged-in device, and ending them one at a
-  time. Today only removing a key ends logins, all of that key's at once.
-- **Longer history.** Resolved requests are deleted after `--retention`
-  (7 days); a permanent audit log would need its own storage.
 - **Passkey-native signatures.** `webauthn-sk-ecdsa` signatures straight from the
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
