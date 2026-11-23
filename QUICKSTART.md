@@ -51,9 +51,15 @@ The log shows a `login.tailscale.com` link. Open it and approve the new
 `listening url=https://phonekey.YOURTAILNET.ts.net`. The site can take a minute
 to load the first time, while the certificate is issued.
 
-Two lines can be ignored:
-- `interfaces: failed to read /proc/net/route` (the sandbox hides it)
-- `no --vapid-subject set` (only shown if you left `vapidSubject` out)
+`interfaces: failed to read /proc/net/route` in the log can be ignored; the
+sandbox hides that file.
+
+**Optional: keep it from reaching your other machines.** The machine is
+approved with your account, so the default tailnet policy lets it connect to
+all your devices, like any of them. The systemd sandbox doesn't cover this:
+phonekeyd talks to the tailnet from inside the process. It only matters if
+phonekeyd itself is compromised. To close it, tag the machine, which takes it
+out of "your devices", and allow connections only from your devices.
 
 ## 2. The phone
 
@@ -139,6 +145,9 @@ systemctl --user start phonekey-agent      # from the next login on it starts by
 journalctl --user -u phonekey-agent -f
 ```
 
+Until you've finished step 4, ssh to the hosts in `ssh.hosts` fails for you:
+it already goes through the agent and `~/.ssh/active_auth.pub`.
+
 ## 4. Your keys and tools
 
 Save the phone key, and make it the active one:
@@ -213,6 +222,7 @@ ssh needs no config of your own for GitHub: the module sets it up.
 - `phonekey-use desktop`: everything goes to 1Password on the Mac. It needs
   the forwarding running ([below](#forwarding-1password)), or signing and
   logins fail.
+- `phonekey-use ~/.ssh/other.pub`: one key file for both
 - `phonekey-use`: shows where the two links point
 
 The choice applies to the whole dev box, every shell at once. Short aliases help,
@@ -273,8 +283,8 @@ needed unless the hostname changes.
   ssh at another agent or another `IdentityFile`, or the links point at the
   1Password keys while the forwarded agent isn't connected. GitHub also only
   asks for a signature with a key registered there as an Authentication key.
-- **The agent doesn't start:** it waits for `~/.config/phonekey/token`. Check
-  `systemctl --user status phonekey-agent`.
+- **The agent doesn't start:** it's skipped while `~/.config/phonekey/token`
+  doesn't exist. Once it does: `systemctl --user start phonekey-agent`.
 - **No notification:** check **Send test** in the app, and that the request
   shows up in the app at all (if so, it's the notification side).
 - **The page shows "reconnecting…":** it reconnects by itself; **Reload** in

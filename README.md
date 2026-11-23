@@ -83,13 +83,14 @@ phonekeyd --db ~/phonekey/phonekey.db serve \
   `$TS_AUTHKEY`). Without one, phonekeyd logs a login URL and waits for you to
   approve the machine. The node state is kept in `tailscale/` next to the
   database, so later starts don't need either.
-- **Auth key.** Prefer a single-use, tagged auth key (e.g. `tag:phonekey`), and a
-  tailnet ACL that lets your devices reach that tag but gives the tag itself no
-  outbound access. The phonekey machine is a full tailnet member, and its
-  traffic runs inside phonekeyd, out of reach of host firewalls or systemd. A
-  single-use key can't add further machines if it leaks.
-- **Key expiry.** Consider disabling key expiry for the machine in the admin
-  console, or it drops off the tailnet when its node key expires.
+- **Auth key.** Prefer a single-use, tagged auth key (e.g. `tag:phonekey`),
+  and a tailnet ACL that lets your devices reach that tag but gives the tag
+  itself no outbound access. The phonekey machine is a full tailnet member, and
+  its traffic runs inside phonekeyd, out of reach of host firewalls or systemd.
+  A single-use key can't add further machines if it leaks.
+- **Key expiry.** Tagged machines don't expire. Otherwise, disable key expiry
+  for the machine in the admin console, or it drops off the tailnet when its
+  node key expires.
 - **No local listener.** There's no plain listener unless you add
   `--addr 127.0.0.1:8080`. Agents, including one on the same host, use the
   `https://phonekey.<tailnet>.ts.net` URL. That needs their host on the tailnet
@@ -282,7 +283,9 @@ that user:
 - the binaries and a `phonekey-use` switching helper
 - ssh using the agent for chosen hosts (`ssh.hosts`, default `github.com`)
 
-The token goes in `~/.config/phonekey/token`; the service waits for it.
+The token goes in `~/.config/phonekey/token`. The service is skipped while it's
+missing, so start it once it's there (`systemctl --user start phonekey-agent`);
+later logins start it by themselves.
 [QUICKSTART.md](QUICKSTART.md) shows it in full.
 
 Elsewhere, a systemd user unit is enough (no root needed). For example,
@@ -389,7 +392,8 @@ keys, so its prompt tells you which kind of request it is.
 **Switching between 1Password and the phone.** With `--upstream`, one agent
 offers both kinds of key, and the links decide which is used. With the NixOS
 module, `phonekey-use desktop` / `phonekey-use phone` switches both links
-between named keys (`identities`: one key, or a `sign`/`auth` pair). By hand:
+between named keys (`identities`: one key, or a `sign`/`auth` pair), and
+`phonekey-use FILE` points both at one key file. By hand:
 
 ```sh
 # at the desk: 1Password approves
@@ -756,7 +760,8 @@ drive Chromium.
   module set used by `nix build`. That's a second, independent check on top of
   `go.sum`: any change to any dependency's contents fails the build until the
   hash is updated on purpose. `flake.lock` pins nixpkgs, and with it the Go
-  toolchain.
+  toolchain, for builds of this flake. Through the NixOS modules with
+  `inputs.nixpkgs.follows`, the toolchain comes from your system's nixpkgs.
 - **The page's one dependency** is vendored, with its npm integrity hash in
   `web/vendor/README.md`. Nothing is fetched at build or run time.
 - **Tests only.** The e2e sshd image uses `alpine:3.22` by tag, not by digest.
