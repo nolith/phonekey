@@ -72,7 +72,7 @@
             RemoveIPC = true;
             ProtectSystem = "strict";
             ProtectHome = true;
-            # Other accounts can't see the process, nor it theirs.
+            # The process can't see other accounts' processes in /proc.
             ProtectProc = "invisible";
             ProcSubset = "pid";
             ProtectClock = true;

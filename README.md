@@ -119,7 +119,7 @@ The flake's module runs one instance per person. They aren't tied to Linux users
 on the box; each is a hardened system service under its own account
 `phonekeyd-<name>`, with its state in `/var/lib/phonekeyd/<name>`. Other
 services and accounts on the box, and the other instances, can't read its
-state, see its process or reach it.
+state or reach it.
 
 ```nix
 # flake inputs: phonekey.url = "github:<you>/phonekey";
@@ -175,8 +175,8 @@ modules = [
   dependency) can't reach beyond its own instance: not other services, other
   instances or accounts on the host. Each instance:
   - runs as its own account with its own user namespace and no capabilities
-  - can only write its own state directory, and other accounts can't see its
-    process
+  - can only write its own state directory, and can't see other accounts'
+    processes
   - runs under a syscall filter, with no access to the host's tailscaled or
     D-Bus sockets, and limits on memory and tasks
   - can't reach localhost, link-local, private or tailnet addresses, except
