@@ -10,7 +10,6 @@ self.addEventListener("push", (event) => {
       body: msg.body,
       tag: msg.id || "phonekey",
       data: { url: msg.id ? `/?req=${encodeURIComponent(msg.id)}` : "/" },
-      requireInteraction: true,
     }),
   );
 });

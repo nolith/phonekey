@@ -120,6 +120,7 @@ button:disabled { opacity: .5; cursor: default; }
 }
 
 .sticky button { flex: 1; }
+.sticky #approve-grant { flex-basis: 100%; }
 
 hr { border: 0; border-top: 1px solid var(--rule); margin: 18px 0; }
 
@@ -168,19 +169,24 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 18px 0; }
 .grant {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   background: var(--accent-soft);
   border-radius: 10px;
   padding: 10px 14px;
 }
 
+.grant strong { overflow-wrap: anywhere; }
 .grant span { display: block; font-size: 14px; color: var(--muted); }
+.grant ul { list-style: none; padding: 0; margin: 4px 0 0; font-size: 14px; }
 
 .plain { list-style: none; padding: 0; margin: 0 0 10px; }
 .plain li { padding: 6px 0; border-bottom: 1px solid var(--rule); font-size: 14px; overflow-wrap: anywhere; }
 
 .history .st { font-weight: 600; margin-right: 6px; }
+.history .st-denied { color: var(--danger); }
+.history .st-expired, .history .st-cancelled { color: var(--muted); }
+.history details summary { font-weight: 400; font-size: 13px; color: var(--muted); padding: 2px 0; }
 
 summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
 

@@ -217,7 +217,9 @@ async function signRequest(req, key, grant = false) {
   await api("POST", `/api/web/requests/${req.id}/signature`, { signature: btoaBytes(sig), grant });
 }
 
-async function approve() {
+// approve signs the selected requests. With withGrant it then keeps the key
+// for the rest of the commands they came from.
+async function approve(withGrant) {
   const reqs = state.pending.filter((r) => state.selected.has(r.id));
   if (!reqs.length) return;
   const key = await unlock();
@@ -230,9 +232,10 @@ async function approve() {
       errors.push(`${r.summary}: ${e.message}`);
     }
   }
-  const seconds = grantSeconds();
-  const scopes = reqs.map((r) => r.context.scope).filter(Boolean);
-  if (seconds > 0 && scopes.length && !errors.length) startGrant(key, scopes, seconds, reqs.map((r) => r.id));
+  const covered = reqs.filter(grantable);
+  if (withGrant && covered.length && !errors.length) {
+    startGrant(key, covered, grantSeconds(), reqs.map((r) => r.id));
+  }
   if (errors.length) throw new Error(errors.join("\n"));
 }
 
@@ -244,20 +247,50 @@ async function deny() {
   }
 }
 
-// Grants: keep the derived key in memory briefly and sign requests from the
-// same process tree as they arrive. Ends on timeout, when the page is hidden,
-// or when the user taps End.
+// Grants: after "Approve + rest of <command>", keep the key in memory briefly
+// and sign further requests from the same command (the same process tree on
+// the dev box) as they arrive. Ends on timeout, when the page is hidden, or
+// when the user taps End.
 
 function grantSeconds() {
   const max = state.config?.max_grant_seconds ?? 0;
-  return Math.min(Number(pref("grant", "30")), max);
+  return Math.min(Number(pref("grant", "30")) || 30, max);
+}
+
+// scopeProcess is the outermost git/jj/ssh process of a request's scope.
+function scopeProcess(r) {
+  const pid = Number((r.context.scope || "").split(":")[0]);
+  return (r.context.processes || []).find((p) => p.pid === pid);
+}
+
+// grantable reports whether more requests could follow from the same
+// command. An ssh or ssh-keygen started on its own signs once and exits.
+function grantable(r) {
+  if (!r.context.scope || !state.config.max_grant_seconds) return false;
+  const top = scopeProcess(r);
+  return !top || (top.command !== "ssh" && top.command !== "ssh-keygen");
+}
+
+function commandLabel(r) {
+  return r.context.action || scopeProcess(r)?.command || "this command";
+}
+
+function shorten(s, n) {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
 // done lists requests already signed, which the pending list may still show
 // until the next event arrives.
-function startGrant(key, scopes, seconds, done) {
+function startGrant(key, reqs, seconds, done) {
   endGrant();
-  const g = { key, scopes: new Set(scopes), until: Date.now() + seconds * 1000, signed: [], busy: new Set(done) };
+  const g = {
+    key,
+    scopes: new Set(reqs.map((r) => r.context.scope)),
+    labels: [...new Set(reqs.map(commandLabel))],
+    until: Date.now() + seconds * 1000,
+    signed: [],
+    busy: new Set(done),
+  };
   g.timer = setInterval(() => (Date.now() >= g.until ? endGrant() : renderGrant()), 500);
   state.grant = g;
   renderGrant();
@@ -295,8 +328,12 @@ function renderGrant() {
   show("grant", !!g);
   if (!g) return;
   const left = Math.max(0, Math.ceil((g.until - Date.now()) / 1000));
-  const signed = g.signed.length ? ` · signed ${g.signed.length}: ${g.signed.join("; ")}` : "";
-  $("grant-info").textContent = `${left}s left, same process tree only${signed}`;
+  $("grant-title").textContent = `Auto-approving more from: ${g.labels.join(", ")}`;
+  $("grant-info").textContent = `${left}s left`;
+  const list = $("grant-signed");
+  if (list.childElementCount !== g.signed.length) {
+    list.replaceChildren(...g.signed.map((s) => h("li", {}, "✓ " + s)));
+  }
 }
 
 // Live updates
@@ -320,6 +357,7 @@ function connectEvents() {
     state.seen = ids;
     renderRequests();
     runGrant();
+    if ($("history-details").open) renderHistory().catch(setError);
     closeNotifications(ids);
   });
   es.onerror = () => {
@@ -420,6 +458,7 @@ function renderContext(c) {
     parts.push(
       kv([
         [g.type === "tag" ? "Tag" : "Commit", g.subject],
+        ["Change", g.change_id],
         ["Tag name", g.tag],
         ["Author", g.author],
         ["Committer", g.committer !== g.author ? g.committer : null],
@@ -468,8 +507,13 @@ function renderRequests() {
 }
 
 function renderActions() {
-  const n = state.pending.filter((r) => state.selected.has(r.id)).length;
+  const selected = state.pending.filter((r) => state.selected.has(r.id));
+  const n = selected.length;
   show("actions", state.pending.length > 0);
+  const labels = [...new Set(selected.filter(grantable).map(commandLabel))];
+  show("approve-grant", labels.length > 0);
+  $("approve-grant").textContent =
+    labels.length === 1 ? `Approve + rest of “${shorten(labels[0], 48)}”` : "Approve + rest of these commands";
   $("approve").textContent = n > 1 ? `Approve ${n}` : "Approve";
   $("deny").textContent = n > 1 ? `Deny ${n}` : "Deny";
   $("approve").disabled = $("deny").disabled = n === 0;
@@ -492,26 +536,37 @@ function renderKeys() {
 function renderGrantOptions() {
   const sel = $("grant-seconds");
   const max = state.config.max_grant_seconds;
-  const opts = [0, 15, 30, 60, 120].filter((s) => s <= max);
-  sel.replaceChildren(...opts.map((s) => h("option", { value: String(s) }, s ? `${s} seconds` : "Off")));
+  const opts = [15, 30, 60, 120].filter((s) => s <= max);
+  sel.replaceChildren(...opts.map((s) => h("option", { value: String(s) }, `${s} seconds`)));
   sel.value = String(grantSeconds());
   sel.disabled = max === 0;
+}
+
+const STATUS = { signed: "✓ signed", denied: "✗ denied", expired: "expired", cancelled: "cancelled" };
+
+function historyItem(r, open) {
+  let status = STATUS[r.status] || r.status;
+  if (r.status === "signed") status += r.via_grant ? " · grant" : " · you";
+  // Login summaries already name the server and the git action.
+  const command = r.details.kind === "userauth" ? null : r.context.action;
+  const when = new Date(r.created_at * 1000).toLocaleString();
+  const change = r.context.git_object?.change_id;
+  return h(
+    "li",
+    { "data-id": r.id },
+    h("span", { class: "st st-" + r.status }, status),
+    r.summary,
+    h("div", { class: "card-meta" }, [change && change.slice(0, 12), command, r.devbox, when].filter(Boolean).join(" · ")),
+    h("details", { open: open.has(r.id) }, h("summary", {}, "details"), renderDetails(r), renderContext(r.context)),
+  );
 }
 
 async function renderHistory() {
   if (!state.config.logged_in) return;
   const items = await api("GET", "/api/web/history");
-  $("history").replaceChildren(
-    ...items.map((r) =>
-      h(
-        "li",
-        {},
-        h("span", { class: "st" }, r.status + (r.via_grant ? " (grant)" : "")),
-        r.summary,
-        h("div", { class: "card-meta" }, `${r.devbox} · ${new Date(r.created_at * 1000).toLocaleString()}`),
-      ),
-    ),
-  );
+  // Keep expanded entries expanded across live refreshes.
+  const open = new Set([...$("history").querySelectorAll("li:has(> details[open])")].map((li) => li.dataset.id));
+  $("history").replaceChildren(...items.map((r) => historyItem(r, open)));
 }
 
 function render() {
@@ -591,7 +646,7 @@ function action(id, fn) {
       setError(err);
     } finally {
       btn.disabled = false;
-      if (id === "approve" || id === "deny") renderActions();
+      if (id.startsWith("approve") || id === "deny") renderActions();
     }
   });
 }
@@ -619,7 +674,8 @@ async function main() {
     $("pair-code").placeholder = "not needed while logged in";
   });
   action("login", login);
-  action("approve", approve);
+  action("approve", () => approve(false));
+  action("approve-grant", () => approve(true));
   action("deny", deny);
   action("grant-end", async () => endGrant());
   action("push-enable", enablePush);

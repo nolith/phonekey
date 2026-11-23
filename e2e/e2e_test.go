@@ -219,6 +219,11 @@ git-sign-on-push = "~signed() & mine()"
 	if !strings.HasPrefix(reqs[0].Context.Action, "jj git push") {
 		t.Fatalf("jj action %q", reqs[0].Context.Action)
 	}
+	for _, r := range reqs[:2] {
+		if len(r.Context.GitObject.ChangeID) != 32 {
+			t.Fatalf("jj commit without a change id: %+v", r.Context.GitObject)
+		}
+	}
 	subjects := []string{reqs[0].Context.GitObject.Subject, reqs[1].Context.GitObject.Subject}
 	slices.Sort(subjects)
 	if !slices.Equal(subjects, []string{"jj one", "jj two"}) {

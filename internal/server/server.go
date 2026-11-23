@@ -42,6 +42,9 @@ type Config struct {
 	SessionTTL time.Duration
 	Retention  time.Duration
 	MaxGrant   time.Duration
+	// PushHoldBack is how long a new request waits before its push when the
+	// page may hold a grant that will sign it right away.
+	PushHoldBack time.Duration
 
 	// AllowUnknownKinds lets dev boxes queue data that's neither an SSH
 	// userauth payload nor an SSHSIG blob.
@@ -76,6 +79,9 @@ func (c *Config) defaults() {
 	}
 	if c.Retention == 0 {
 		c.Retention = 7 * 24 * time.Hour
+	}
+	if c.PushHoldBack == 0 {
+		c.PushHoldBack = 2 * time.Second
 	}
 	if c.PushClient == nil {
 		c.PushClient = &http.Client{Timeout: 20 * time.Second}
@@ -337,8 +343,27 @@ func (s *Server) createRequest(w http.ResponseWriter, r *http.Request, d *store.
 	}
 	s.log.Info("request created", "id", id, "devbox", d.Name, "kind", details.Kind, "summary", summary)
 	s.events.notify()
-	go s.push.send(context.WithoutCancel(r.Context()), PushMessage{ID: id, Title: d.Name, Body: summary})
+	go s.notify(context.WithoutCancel(r.Context()), id, req.Context.Scope, PushMessage{ID: id, Title: d.Name, Body: summary})
 	writeJSON(w, http.StatusCreated, protocol.CreateResponse{ID: id, ExpiresAt: expires.Unix()})
+}
+
+// notify pushes a new request. If a request from the same command was
+// signed recently enough that the page may still hold a grant for it, the
+// push waits briefly and is dropped if the grant signed the request.
+func (s *Server) notify(ctx context.Context, id, scope string, msg PushMessage) {
+	if scope != "" && s.cfg.MaxGrant > 0 {
+		recent, err := s.store.SignedInScopeSince(ctx, scope, time.Now().Add(-s.cfg.MaxGrant))
+		if err != nil {
+			s.log.Error("push: checking scope", "err", err)
+		}
+		if recent {
+			time.Sleep(s.cfg.PushHoldBack)
+			if req, err := s.store.Request(ctx, id); err == nil && req.Status != protocol.StatusPending {
+				return
+			}
+		}
+	}
+	s.push.send(ctx, msg)
 }
 
 func effectiveStatus(r *store.Request) string {

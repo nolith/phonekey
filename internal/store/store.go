@@ -417,6 +417,16 @@ func (s *Store) Request(ctx context.Context, id string) (*Request, error) {
 		FROM requests r JOIN devboxes d ON d.id = r.devbox_id WHERE r.id = ?`, id))
 }
 
+// SignedInScopeSince reports whether a request with the given context scope
+// was signed at or after since.
+func (s *Store) SignedInScopeSince(ctx context.Context, scope string, since time.Time) (bool, error) {
+	var found bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM requests
+		WHERE status = ? AND resolved_at >= ? AND json_extract(context, '$.scope') = ?)`,
+		protocol.StatusSigned, since.Unix(), scope).Scan(&found)
+	return found, err
+}
+
 // PendingRequests returns live requests, oldest first.
 func (s *Store) PendingRequests(ctx context.Context) ([]Request, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+requestCols+`

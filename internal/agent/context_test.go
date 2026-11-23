@@ -67,13 +67,14 @@ func TestScope(t *testing.T) {
 
 func TestParseGitObject(t *testing.T) {
 	commit := "tree 4b825dc642cb6eb9a060e54bf8d69288fbee4904\nparent a\nparent b\n" +
-		"author Ada <ada@example.com> 1700000000 +0100\ncommitter Bob <bob@example.com> 1700000001 +0000\n\n" +
+		"author Ada <ada@example.com> 1700000000 +0100\ncommitter Bob <bob@example.com> 1700000001 +0000\n" +
+		"change-id pwsrmprsornovmzvounuvnylntqlnuwt\n\n" +
 		"Merge things\n\nLonger explanation.\n"
 	g := parseGitObject([]byte(commit))
 	want := GitObjectFields{"commit", "Ada <ada@example.com>", "Bob <bob@example.com>", "Merge things", "Longer explanation.", 2}
 	got := GitObjectFields{g.Type, g.Author, g.Committer, g.Subject, g.Body, g.Parents}
-	if got != want {
-		t.Fatalf("got %+v", got)
+	if got != want || g.ChangeID != "pwsrmprsornovmzvounuvnylntqlnuwt" {
+		t.Fatalf("got %+v, change id %q", got, g.ChangeID)
 	}
 	tag := parseGitObject([]byte("object a\ntype commit\ntag v1.0\ntagger Ada <ada@example.com> 1 +0000\n\nRelease 1.0\n"))
 	if tag.Type != "tag" || tag.Tag != "v1.0" || tag.Subject != "Release 1.0" {

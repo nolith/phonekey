@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -296,4 +297,62 @@ func TestEventsAndPush(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("no push sent")
+}
+
+func TestPushHoldBack(t *testing.T) {
+	var pushes atomic.Int32
+	pushSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pushes.Add(1)
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer pushSrv.Close()
+	e := setup(t, server.Config{PushClient: pushSrv.Client(), MaxGrant: time.Minute, PushHoldBack: 300 * time.Millisecond})
+	ctx := context.Background()
+	if err := e.phone.Login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ := json.Marshal(map[string]any{
+		"endpoint": pushSrv.URL + "/push/abc",
+		"keys": map[string]string{
+			"p256dh": "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+			"auth":   "tBHItJI5svbpez7KI4CCXg",
+		},
+	})
+	if err := e.phone.Post(ctx, "/api/web/push/subscribe", json.RawMessage(sub), nil); err != nil {
+		t.Fatal(err)
+	}
+	create := func(scope string) protocol.WebRequest {
+		t.Helper()
+		c, err := e.backend.Create(ctx, protocol.CreateRequest{PublicKey: e.phone.PublicKey(), Data: sshsigBlob(scope), Context: protocol.Context{Scope: scope}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return protocol.WebRequest{ID: c.ID, PublicKey: e.phone.PublicKey(), Data: sshsigBlob(scope)}
+	}
+	waitPushes := func(want int32) {
+		t.Helper()
+		time.Sleep(600 * time.Millisecond)
+		if got := pushes.Load(); got != want {
+			t.Fatalf("pushes: got %d, want %d", got, want)
+		}
+	}
+
+	// The first request of a command notifies; the user approves it.
+	first := create("jj:1")
+	waitPushes(1)
+	if err := e.phone.Approve(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	// The next one from the same command is signed by the grant before its
+	// held-back push goes out, so there's no notification for it.
+	if err := e.phone.Approve(ctx, create("jj:1")); err != nil {
+		t.Fatal(err)
+	}
+	waitPushes(1)
+	// Left unanswered, a held-back request still notifies.
+	create("jj:1")
+	waitPushes(2)
+	// Another command notifies as usual.
+	create("git:2")
+	waitPushes(3)
 }

@@ -174,6 +174,10 @@ func TestBrowser(t *testing.T) {
 	signA, outA, msgA := startSign("a.txt")
 	do(t, browser, chromedp.WaitVisible(chromedp.CSS("#request-list .card")))
 	shot(t, browser, "2-request")
+	// A lone ssh-keygen signs once, so there's nothing for a grant to cover.
+	if evalAsync[bool](t, browser, `Promise.resolve(document.getElementById('approve-grant').hidden)`) != true {
+		t.Fatal("offered a grant for a one-shot ssh-keygen")
+	}
 	signB, outB, msgB := startSign("b.txt")
 	do(t, browser, chromedp.WaitVisible(chromedp.CSS("#request-list .card:nth-child(2)")))
 	checked := evalAsync[[]bool](t, browser, `Promise.resolve([...document.querySelectorAll('#request-list input[type=checkbox]')].map((c) => c.checked))`)
@@ -216,7 +220,12 @@ func TestBrowser(t *testing.T) {
 	if err := rebase.Start(); err != nil {
 		t.Fatal(err)
 	}
-	do(t, browser, chromedp.WaitVisible(chromedp.CSS("#request-list .card")), chromedp.Click(chromedp.ID("approve")))
+	do(t, browser, chromedp.WaitVisible(chromedp.CSS("#request-list .card")))
+	if label := text(t, browser, "approve-grant"); !strings.Contains(label, "git rebase --force-rebase") {
+		t.Fatalf("grant button label %q", label)
+	}
+	shot(t, browser, "3-rebase-request")
+	do(t, browser, chromedp.Click(chromedp.ID("approve-grant")))
 	waitCmd(t, rebase, rebaseOut)
 	for _, rev := range []string{"HEAD", "HEAD~1", "HEAD~2"} {
 		gitIn("verify-commit", rev)
@@ -231,11 +240,31 @@ func TestBrowser(t *testing.T) {
 	if grants != 2 {
 		t.Fatalf("expected 2 signatures under the grant, got %d", grants)
 	}
-	t.Logf("grant banner: %s", text(t, browser, "grant-info"))
+	if title := text(t, browser, "grant-title"); !strings.Contains(title, "Auto-approving more from: git rebase") {
+		t.Fatalf("grant banner title %q", title)
+	}
+	if n := evalAsync[int](t, browser, `Promise.resolve(document.querySelectorAll('#grant-signed li').length)`); n != 2 {
+		t.Fatalf("grant banner lists %d signatures, want 2", n)
+	}
 	if e := pageError(browser); e != "" {
 		t.Fatalf("page shows an error after the grant: %s", e)
 	}
-	shot(t, browser, "3-grant")
+	shot(t, browser, "4-grant")
+
+	// Recent shows who signed each request and the command it came from.
+	do(t, browser,
+		chromedp.Evaluate[chromedp.Void](`document.getElementById('history-details').open = true`),
+		chromedp.WaitVisible(chromedp.CSS("#history li")),
+	)
+	recent := text(t, browser, "history")
+	for _, want := range []string{"✓ signed · grant", "✓ signed · you", "git rebase --force-rebase --gpg-sign HEAD~3 · browser-devbox"} {
+		if !strings.Contains(recent, want) {
+			t.Fatalf("Recent lacks %q:\n%s", want, recent)
+		}
+	}
+	do(t, browser, chromedp.Click(chromedp.CSS("#history li details summary")))
+	shot(t, browser, "4b-recent")
+	do(t, browser, chromedp.Evaluate[chromedp.Void](`document.getElementById('history-details').open = false`))
 
 	// Diagnostics: the page's own SSHSIG output verifies with OpenSSH.
 	do(t, browser,
@@ -243,7 +272,7 @@ func TestBrowser(t *testing.T) {
 		chromedp.Click(chromedp.ID("diag-sign")),
 		chromedp.WaitVisible(chromedp.ID("diag-out")),
 	)
-	shot(t, browser, "4-diagnostics")
+	shot(t, browser, "5-diagnostics")
 	verifyDiag(t, text(t, browser, "diag-out"), "webcrypto")
 
 	// The same through noble-ed25519, the fallback for browsers whose

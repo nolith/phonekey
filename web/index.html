@@ -24,8 +24,9 @@
 
     <section id="grant" class="grant" hidden>
       <div>
-        <strong>Grant open</strong>
+        <strong id="grant-title"></strong>
         <span id="grant-info"></span>
+        <ul id="grant-signed"></ul>
       </div>
       <button id="grant-end" class="secondary">End</button>
     </section>
@@ -66,6 +67,7 @@
       <div id="actions" class="row sticky" hidden>
         <button id="approve">Approve</button>
         <button id="deny" class="danger">Deny</button>
+        <button id="approve-grant" class="secondary" hidden></button>
       </div>
     </section>
 
@@ -79,9 +81,10 @@
           <button id="push-test" class="secondary">Send test</button>
         </div>
         <h3>Grants</h3>
-        <p class="muted">After an approval, keep the key in this page's memory for a short time and sign further requests
-          from the same process tree (one <code>jj</code> or <code>git</code> invocation) without Face ID. The scope comes
-          from the dev box, so a compromised dev box could pass a request off as part of it.</p>
+        <p class="muted"><em>Approve + rest of …</em> keeps the key in this page's memory for a short time and signs
+          further requests from the same command (one <code>jj sign</code>, <code>jj git push</code> or
+          <code>git rebase -S</code>) without asking again. Which command a request belongs to comes from the dev box,
+          so a compromised dev box could pass a request off as part of it.</p>
         <label>Grant length <select id="grant-seconds"></select></label>
         <h3>Keys</h3>
         <ul id="keys" class="plain"></ul>

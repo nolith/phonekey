@@ -51,9 +51,11 @@ type GitObject struct {
 	Committer string `json:"committer,omitempty"`
 	Tagger    string `json:"tagger,omitempty"`
 	Tag       string `json:"tag,omitempty"`
-	Subject   string `json:"subject,omitempty"`
-	Body      string `json:"body,omitempty"`
-	Parents   int    `json:"parents,omitempty"`
+	// ChangeID is jj's change id, from the commit's change-id header.
+	ChangeID string `json:"change_id,omitempty"`
+	Subject  string `json:"subject,omitempty"`
+	Body     string `json:"body,omitempty"`
+	Parents  int    `json:"parents,omitempty"`
 }
 
 // CreateRequest is POSTed by the agent to /api/devbox/requests.

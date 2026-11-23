@@ -245,6 +245,8 @@ func parseGitObject(content []byte) *protocol.GitObject {
 		case "tag":
 			obj.Tag = v
 			obj.Type = "tag"
+		case "change-id":
+			obj.ChangeID = v
 		}
 	}
 	subject, body, _ := strings.Cut(strings.TrimSpace(string(message)), "\n")

@@ -43,9 +43,14 @@ Automated, on this box (OpenSSH 10.6p1, git 2.56, jj 0.47.1, Chromium 158):
   its hash against the SSHSIG blob, and the phone sees author/subject/body.
   `git verify-commit` / `verify-tag` pass.
 - `git rebase --gpg-sign` over 3 commits: 3 requests sharing one grant scope.
+  In the page, *Approve + rest of "git rebase …"* signs the first and the
+  grant signs the other two; no grant is offered for a lone `ssh-keygen`.
+- While a grant may be open, a request from the same command holds its push
+  back for 2 s and drops it if the grant signed it, so auto-signed requests
+  don't each produce a notification.
 - jj with `revsets.git-sign-on-push`: `jj git push` of two commits = 2 SSHSIG
   + 1 login, all in one scope; with `phonekey-keygen` the phone sees both
-  commit subjects. Pushed commits verify with plain git and `jj log` says `good`.
+  commit subjects and jj change ids (from the commit's `change-id` header). Pushed commits verify with plain git and `jj log` says `good`.
 - Deny on the phone fails the push; Ctrl-C (SIGINT to the process group)
   cancels the request on the backend; no answer → agent gives up at its deadline.
 - Of two requests pending at once, only the one that arrived first (or the
@@ -58,6 +63,8 @@ Automated, on this box (OpenSSH 10.6p1, git 2.56, jj 0.47.1, Chromium 158):
   WebCrypto Ed25519 passes the RFC 8032 vectors. The diagnostics signature is
   also checked with the noble-ed25519 fallback forced.
 - Push: VAPID-signed, aes128gcm-encrypted request reaches a (fake) push service.
+- *Recent* shows whether you or a grant signed each request, the command it
+  came from, and the same details as the pending card.
 
 Not verifiable here (needs your devices): PRF on iOS (iCloud Keychain and
 1Password), in the home-screen app; Safari's Ed25519; real push delivery;
@@ -149,7 +156,7 @@ either way.
 
 | Decision | Default | Where |
 | --- | --- | --- |
-| Grants | page offers Off/15/30/60 s, defaults to 30 s, capped by server | `phonekeyd serve --max-grant` (0 disables), page *Grants* setting |
+| Grants | chosen per approval with *Approve + rest of "<command>"*; window 30 s, capped by the server | page *Grant length* setting, `phonekeyd serve --max-grant` (0 removes the button) |
 | Agent deadline | 90 s | `phonekey-agent --deadline` (backend clamps to `--max-ttl`, 5 min) |
 | Refuse unbound SSH logins | on | `--require-session-bind` |
 | Refuse unknown hosts | off (hosts are named when known) | `--require-known-host`, `--known-hosts` |
