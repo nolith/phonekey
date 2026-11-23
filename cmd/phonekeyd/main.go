@@ -78,7 +78,7 @@ func main() {
 func serve(ctx context.Context, st *store.Store, dbPath string, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	addr := fs.String("addr", os.Getenv("PHONEKEY_ADDR"),
-		"plain HTTP listen address (default 127.0.0.1:8080, or none with --tailscale-hostname) ($PHONEKEY_ADDR)")
+		"plain HTTP listen address, host:port or unix:/path (default 127.0.0.1:8080, or none with --tailscale-hostname) ($PHONEKEY_ADDR)")
 	tsHostname := fs.String("tailscale-hostname", os.Getenv("PHONEKEY_TS_HOSTNAME"),
 		"also join the tailnet as this machine name and serve HTTPS at https://NAME.<tailnet>.ts.net ($PHONEKEY_TS_HOSTNAME)")
 	tsDir := fs.String("tailscale-dir", "", "tailnet node state (default: tailscale/ next to the database)")
@@ -133,7 +133,7 @@ func serve(ctx context.Context, st *store.Store, dbPath string, args []string) e
 	}()
 	errc := make(chan error, 2)
 	if *addr != "" {
-		ln, err := net.Listen("tcp", *addr)
+		ln, err := listenPlain(*addr)
 		if err != nil {
 			return err
 		}
@@ -158,6 +158,25 @@ func serve(ctx context.Context, st *store.Store, dbPath string, args []string) e
 		return err
 	}
 	return nil
+}
+
+// listenPlain listens on host:port, or on unix:/path. A Unix socket is
+// created for phonekeyd's own account and group only (and root, e.g. a
+// tailscaled proxying to it); a reverse proxy gets access by joining the
+// group.
+func listenPlain(addr string) (net.Listener, error) {
+	path, ok := strings.CutPrefix(addr, "unix:")
+	if !ok {
+		return net.Listen("tcp", addr)
+	}
+	if c, err := net.Dial("unix", path); err == nil {
+		c.Close()
+		return nil, fmt.Errorf("%s is in use", path)
+	}
+	os.Remove(path)
+	old := syscall.Umask(0o117)
+	defer syscall.Umask(old)
+	return net.Listen("unix", path)
 }
 
 // listenTailnet joins the tailnet as its own machine (no root or tailscaled
