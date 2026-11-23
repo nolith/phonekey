@@ -362,7 +362,23 @@ function connectEvents() {
   });
   es.onerror = () => {
     $("conn").textContent = "reconnecting…";
+    // The browser retries dropped connections itself, but gives up for good
+    // after an HTTP error, such as a proxy's 502 while phonekeyd restarts.
+    if (es.readyState === EventSource.CLOSED) reconnectLater(es);
   };
+}
+
+function reconnectLater(es) {
+  setTimeout(async () => {
+    if (state.events !== es) return;
+    try {
+      await loadConfig();
+    } catch {
+      return reconnectLater(es);
+    }
+    state.events = null;
+    render(); // reconnects if still logged in, shows pairing otherwise
+  }, 3000);
 }
 
 async function closeNotifications(live) {
@@ -700,6 +716,10 @@ async function main() {
   $("history-details").addEventListener("toggle", (e) => e.target.open && renderHistory().catch(setError));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) endGrant();
+    else if (state.events?.readyState === EventSource.CLOSED) {
+      state.events = null;
+      render();
+    }
   });
   setInterval(tickCountdowns, 1000);
 }

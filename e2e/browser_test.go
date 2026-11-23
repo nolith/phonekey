@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -48,9 +49,20 @@ func TestBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := &http.Server{Handler: srv}
+	// failEvents makes the event stream answer 502, as a proxy in front of a
+	// restarting phonekeyd would.
+	var failEvents, failedEvents atomic.Bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failEvents.Load() && r.URL.Path == "/api/web/events" {
+			failedEvents.Store(true)
+			http.Error(w, "bad gateway", http.StatusBadGateway)
+			return
+		}
+		srv.ServeHTTP(w, r)
+	})
+	hs := &http.Server{Handler: handler}
 	go hs.Serve(ln)
-	defer hs.Close()
+	defer func() { hs.Close() }()
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 	// WebAuthn needs a domain, not an IP, and localhost counts as secure.
 	url := "http://localhost:" + port
@@ -265,6 +277,26 @@ func TestBrowser(t *testing.T) {
 	do(t, browser, chromedp.Click(chromedp.CSS("#history li details summary")))
 	shot(t, browser, "4b-recent")
 	do(t, browser, chromedp.Evaluate[chromedp.Void](`document.getElementById('history-details').open = false`))
+
+	// A restart behind a proxy: the stream drops and the reconnect gets a
+	// 502, after which the browser stops retrying on its own. The page has
+	// to reconnect by itself.
+	failEvents.Store(true)
+	hs.Close()
+	ln, err = net.Listen("tcp", "127.0.0.1:"+port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs = &http.Server{Handler: handler}
+	go hs.Serve(ln)
+	for i := 0; i < 100 && !failedEvents.Load(); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !failedEvents.Load() {
+		t.Fatal("the page never retried the event stream")
+	}
+	failEvents.Store(false)
+	do(t, browser, chromedp.Poll[chromedp.Void](`document.getElementById('conn').textContent === 'live'`, chromedp.WithPollingTimeout(15*time.Second)))
 
 	// Diagnostics: the page's own SSHSIG output verifies with OpenSSH.
 	do(t, browser,
