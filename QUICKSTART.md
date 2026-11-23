@@ -3,7 +3,10 @@
 One concrete setup, end to end:
 - the backend on a NixOS host, as its own tailnet machine
 - an iPhone as the approver
-- the agent on a NixOS dev box (the same machine or another one)
+- the agent on a NixOS dev box (the same machine or another one), which also
+  offers the keys of a 1Password agent forwarded from your Mac, so you can
+  approve with 1Password at the desk and with the phone everywhere else
+  ([forwarding 1Password](#forwarding-1password))
 
 Replace `YOURTAILNET` with your tailnet's name (e.g. `tail1234ab`), and `you` with
 your user name. The [README](README.md) covers the other setups and how it all
@@ -19,7 +22,7 @@ In the host's system flake (`/etc/nixos/flake.nix`):
 ```diff
    inputs = {
      nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
-+    phonekey.url = "git+file:///home/you/phonekey";  # or github:…
++    phonekey.url = "github:stancl/phonekey";
 +    phonekey.inputs.nixpkgs.follows = "nixpkgs";
    };
 
@@ -93,7 +96,7 @@ phonekey.nixosModules.phonekey-agent
 {
   programs.phonekey-agent.users.you = {
     backend = "https://phonekey.YOURTAILNET.ts.net";
-    # Also offer a forwarded 1Password agent's keys (while `ssh -A` is connected).
+    # Also offer the keys of the forwarded 1Password agent, while it's connected.
     upstream = "$XDG_RUNTIME_DIR/op-agent.sock";
     # Names for `phonekey-use`.
     identities = { phone = "~/.ssh/phonekey.pub"; desktop = "~/.ssh/op-github.pub"; };
@@ -132,10 +135,11 @@ with-env { SSH_AUTH_SOCK: $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock" } { ssh-
 phonekey-use phone
 ```
 
-git, jj and ssh sign with whatever `~/.ssh/active.pub` points at. Switch with
-`phonekey-use phone` (approve on the phone) or `phonekey-use desktop` (approve
-with 1Password, which needs an `ssh -A` session). `phonekey-use` on its own
-shows the current one.
+git, jj and ssh sign with whatever `~/.ssh/active.pub` points at. Switch with:
+- `phonekey-use phone`: approve on the phone
+- `phonekey-use desktop`: approve with 1Password; needs the forwarded agent,
+  see [below](#forwarding-1password)
+- `phonekey-use` on its own shows the current one
 
 **git** (`~/.config/git/config`). `phonekey-keygen` finds the agent by itself:
 
@@ -148,8 +152,8 @@ shows the current one.
 	signingkey = ~/.ssh/active.pub
 ```
 
-**jj** (`~/.config/jj/config.toml`). Commits are signed when you push, so one
-approval covers a whole push:
+**jj** (`~/.config/jj/config.toml`). Nothing is signed automatically; you sign
+deliberately, with `jj sign -r a..d` before pushing:
 
 ```toml
 [signing]
@@ -159,10 +163,10 @@ key = "~/.ssh/active.pub"
 
 [signing.backends.ssh]
 program = "phonekey-keygen"
-
-[revsets]
-git-sign-on-push = "~signed() & mine()"
 ```
+
+Signing a range is one command, so it's one approval: tap **Approve + rest of
+"jj sign …"** on the first commit, and the others are signed as they come in.
 
 ssh needs no config of your own: the module sets it up.
 
@@ -170,16 +174,17 @@ ssh needs no config of your own: the module sets it up.
 
 ```sh
 ssh -T git@github.com     # once the key is an Authentication key on GitHub
-jj sign -r @-             # or: jj git push
+jj sign -r 'trunk()..@-'  # sign everything not yet on trunk
+jj git push
 ```
 
-A notification arrives on the phone. Open it and tap **Approve**, or **Approve +
-rest of "…"** when one command signs several times, like `jj git push` of
-several commits.
+A notification arrives on the phone for each command. Open it and tap
+**Approve**, or **Approve + rest of "…"** when the command signs several
+commits.
 
 ## Updating
 
-After committing changes in the phonekey repository:
+After new commits are pushed to the phonekey repository:
 
 ```sh
 sudo nix flake update phonekey --flake /etc/nixos
@@ -195,11 +200,37 @@ needed unless the hostname changes.
 - **`Load key "….pub": bad permissions` / `Permission denied (publickey)`.** The
   agent ssh talks to doesn't have that key. Either the agent isn't running
   (`systemctl --user status phonekey-agent`), your own `~/.ssh/config` points
-  ssh at another agent, or `active.pub` points at the 1Password key while no
-  `ssh -A` session is connected.
+  ssh at another agent, or `active.pub` points at the 1Password key while the
+  forwarded agent isn't connected.
 - **The agent doesn't start:** it waits for `~/.config/phonekey/token`. Check
   `systemctl --user status phonekey-agent`.
 - **No notification:** check **Send test** in the app, and that the request
   shows up in the app at all (if so, it's the notification side).
 - **The page shows "reconnecting…":** it reconnects by itself; **Reload** in
   the header forces it.
+
+## Forwarding 1Password
+
+For `phonekey-use desktop`, the dev box needs your Mac's 1Password agent. A
+dedicated ssh host on the Mac forwards it to a fixed path on the dev box, which
+`upstream` above points at. In the Mac's `~/.ssh/config`:
+
+```
+Host devbox-agent
+  HostName devbox
+  RemoteForward /run/user/1000/op-agent.sock "/Users/YOU/Library/Group Containers/2BUA8C4S2C.com.1password/t/agent.sock"
+  ExitOnForwardFailure yes
+  ServerAliveInterval 30
+  ServerAliveCountMax 3
+  SessionType none
+```
+
+- **Running it:** `ssh devbox-agent` opens no shell; it only holds the
+  forwarding open. Keep it running while you work at the Mac.
+- **The path:** `/run/user/1000` is your `$XDG_RUNTIME_DIR` on the dev box
+  (`1000` is your user id there).
+- **On the dev box,** sshd must be allowed to replace a stale socket from an
+  earlier connection, or the forwarding fails after the first disconnect:
+  ```nix
+  services.openssh.settings.StreamLocalBindUnlink = "yes";
+  ```

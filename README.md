@@ -126,7 +126,7 @@ services and accounts on the box, and the other instances, can't read its
 state or reach it.
 
 ```nix
-# flake inputs: phonekey.url = "github:<you>/phonekey";
+# flake inputs: phonekey.url = "github:stancl/phonekey";
 modules = [
   phonekey.nixosModules.phonekeyd   # or .default, with the dev box module too
   {
