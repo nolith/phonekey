@@ -25,6 +25,17 @@
         };
       });
 
+      # Unit and in-process integration tests, built with the package's
+      # toolchain and vendored modules. The e2e tests need Docker and a
+      # browser, so they run outside Nix: go test -tags e2e ./e2e
+      checks = forAll (pkgs: {
+        tests = self.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs {
+          name = "phonekey-tests";
+          subPackages = [ "internal/..." ];
+          doCheck = true;
+        };
+      });
+
       # The backend as NixOS services: one instance per person, each under its
       # own system account. The dev box side (phonekey-agent) is a per-user
       # process; see the README.

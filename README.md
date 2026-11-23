@@ -681,11 +681,12 @@ drive Chromium.
 ## Development
 
 ```sh
-nix develop                    # go (nixpkgs toolchain, GOTOOLCHAIN=local), openssh, git, jj, chromium
+nix develop                    # or direnv (.envrc): go (nixpkgs toolchain, GOTOOLCHAIN=local), openssh, git, jj, chromium
 go build -o bin/ ./cmd/...
 go test ./internal/...         # unit and in-process integration
-go test -tags e2e ./e2e        # needs docker and chromium
+go test -tags e2e ./...        # everything, including e2e (needs docker and chromium)
 nix build                      # the package
+nix flake check                # the unit tests in Nix's sandbox, with the package's toolchain and modules
 ```
 
 `e2e/` runs everything for real, with a temporary `HOME`, `GIT_CONFIG_GLOBAL`,
