@@ -1,6 +1,6 @@
 module phonekey
 
-go 1.27.4
+go 1.27.3
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
@@ -9,7 +9,7 @@ require (
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sys v0.50.0
 	modernc.org/sqlite v1.63.0
-	tailscale.com v1.104.7
+	tailscale.com v1.104.6
 )
 
 require (
