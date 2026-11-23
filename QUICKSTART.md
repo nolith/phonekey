@@ -206,17 +206,51 @@ Signing a range is one command, so it's one approval: tap **Approve + rest of
 
 ssh needs no config of your own for GitHub: the module sets it up.
 
-## 5. Try it
+## 5. Day to day
 
-```sh
-ssh -T git@github.com     # once the key is an Authentication key on GitHub
-jj sign -r 'trunk()..@-'  # sign everything not yet on trunk
-jj git push
+**Who approves** follows `phonekey-use`:
+- `phonekey-use phone`: everything goes to the phone
+- `phonekey-use desktop`: everything goes to 1Password on the Mac. It needs
+  the forwarding running ([below](#forwarding-1password)), or signing and
+  logins fail.
+- `phonekey-use`: shows where the two links point
+
+The choice applies to the whole dev box, every shell at once. Short aliases help,
+e.g. in nushell's `config.nu`:
+
+```nu
+alias mobile = phonekey-use phone
+alias desktop = phonekey-use desktop
 ```
 
-A notification arrives on the phone for each command. Open it and tap
-**Approve**, or **Approve + rest of "…"** when the command signs several
-commits.
+**Signing.** Nothing is signed until you ask:
+
+```sh
+jj sign -r 'a..d'
+```
+
+That's one command, so with the phone it's one approval. Tap **Approve + rest of
+"jj sign …"** on the first commit's card, and the others are signed as they
+arrive; the banner lists them. Plain **Approve** signs just that one, and the
+next commit asks again.
+
+**Pushing** is one SSH login, so one approval:
+
+```sh
+jj git push -b main
+```
+
+A quick check of logins on their own: `ssh -T git@github.com`.
+
+**On the phone,** each request is a card:
+- **The signed data:** what kind of request it is, the key, and for logins the
+  server's key.
+- **What the dev box says:** the command, the server, and the commit's
+  subject, author and change id.
+
+**Deny** makes the command on the dev box fail. A request you leave alone
+expires after 90 seconds, and Ctrl-C on the dev box withdraws it. **Recent**
+lists what was signed, and whether you or a grant approved it.
 
 ## Updating
 
