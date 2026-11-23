@@ -129,7 +129,9 @@ How it fits together:
 
 So nothing needs `SSH_AUTH_SOCK`. If you'd rather point `SSH_AUTH_SOCK` at
 phonekey-agent in your shell, that works too, and makes git's `gpg.ssh.program`
-line below unnecessary. See [README section 4](README.md#4-point-git-jj-and-ssh-at-it).
+line below unnecessary. Keep jj's `program = "phonekey-keygen"` either way: it's
+what lets the phone show jj's commits. See
+[README section 4](README.md#4-point-git-jj-and-ssh-at-it).
 
 ```sh
 sudo nixos-rebuild switch --flake /etc/nixos#mydevbox
