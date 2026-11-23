@@ -501,6 +501,10 @@ deletes resolved ones after `--retention` (7 days).
 
 Not handled:
 - rate limits: `nonce` is unauthenticated, and every request sends a push
+- push endpoints aren't restricted to known push services, so self-hosted
+  ones work. A stolen session could therefore make the backend send blind POSTs
+  to any HTTPS address it can reach. The body is an encrypted notification, and
+  the response isn't returned.
 - revoking sessions other than your own (logout)
 - an audit log beyond `--retention`
 - a client that half-closes its socket is treated as disconnected (OpenSSH
@@ -544,9 +548,34 @@ bin/phonekeyd` lists them.
 **Tests only**, not in any binary: `chromedp/chromedp` and `chromedp/cdproto`, which
 drive Chromium.
 
+**Supply chain.**
+- **No floating versions.** `go.mod` names exact versions, and Go's minimal
+  version selection never picks a newer one by itself. Dependencies only change
+  when someone edits `go.mod` (`go get`).
+- **Hashes.** `go.sum` records a SHA-256 hash of each module's contents and of
+  its `go.mod`. It works as the lockfile's hashes: the go command refuses a
+  download that doesn't match.
+- **Replaced tags.** The first time any version is fetched, the go command
+  checks it against `sum.golang.org`, a public append-only log of module hashes.
+  `proxy.golang.org` keeps serving the originally published contents. So a tag
+  that's moved or force-pushed on GitHub later doesn't change what anyone
+  builds: the contents no longer match the log, and the go command stops with a
+  security error.
+- **What this doesn't cover.** A malicious *new* version, published by a
+  compromised maintainer, gets in only when you bump to it. So read the diff of
+  a dependency before bumping it.
+- **No install-time code.** Go has no install scripts like npm's
+  `postinstall`. With cgo off, building runs no code from dependencies.
+- **Nix.** `vendorHash` in `flake.nix` pins the hash of the complete vendored
+  module set used by `nix build`. That's a second, independent check on top of
+  `go.sum`: any change to any dependency's contents fails the build until the
+  hash is updated on purpose. `flake.lock` pins nixpkgs, and with it the Go
+  toolchain.
+- **The page's one dependency** is vendored, with its npm integrity hash in
+  `web/vendor/README.md`. Nothing is fetched at build or run time.
+- **Tests only.** The e2e sshd image uses `alpine:3.22` by tag, not by digest.
+
 **Pinning.**
-- `go.sum` pins every module's hash, and `vendorHash` in `flake.nix` pins the
-  whole vendored set for the Nix build.
 - `tailscale.com` is held at v1.104.6, the newest release that builds with
   nixpkgs' Go 1.27.3.
 - `govulncheck ./...` (2026-11-22) reports one issue, in the standard library:
