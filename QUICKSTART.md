@@ -68,7 +68,8 @@ out of "your devices", and allow connections only from your devices.
    only work in the installed app.
 2. On the host: `sudo phonekeyd-ctl you pair-code`. Enter the code in the app.
 3. Tap **Create passkey**. For iCloud Keychain, pick *Passwords* if iOS offers
-   1Password first.
+   1Password first. If you already have a phonekey passkey for this hostname,
+   tap **Use an existing passkey** instead.
 4. Copy the `ssh-ed25519 …` key it shows.
 5. Under **Notifications, grants and keys**: **Enable notifications**, then
    **Send test**.
@@ -150,18 +151,23 @@ it already goes through the agent and `~/.ssh/active_auth.pub`.
 
 ## 4. Your keys and tools
 
-Save the phone key, and make it the active one:
+Save the phone key, and make it the active one. The agent lists it with the
+comment `phonekey`, next to the 1Password keys:
 
 ```sh
-SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | grep '<the start of your key>' > ~/.ssh/phonekey.pub
+SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | grep ' phonekey$' > ~/.ssh/phonekey.pub
 phonekey-use phone
 ```
 
 ```nu
 # the same in nushell
-with-env { SSH_AUTH_SOCK: $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock" } { ssh-add -L } | lines | where $it =~ '<the start of your key>' | save -f ~/.ssh/phonekey.pub
+with-env { SSH_AUTH_SOCK: $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock" } { ssh-add -L } | lines | where ($it | str ends-with ' phonekey') | save -f ~/.ssh/phonekey.pub
 phonekey-use phone
 ```
+
+`ssh-keygen -lf ~/.ssh/phonekey.pub` should print the fingerprint the app
+shows. With several passkeys registered, every one is listed; keep the line
+that matches.
 
 Check that signing works, before touching any other config:
 
@@ -275,6 +281,14 @@ systemctl --user restart phonekey-agent    # on dev boxes
 The database, the tailnet machine and your passkey stay. No re-pairing is
 needed unless the hostname changes.
 
+**Moving the backend to another host.** Copy `/var/lib/phonekeyd/you` over
+(with the service stopped on both sides), and nothing changes: same tailnet
+machine, keys, dev boxes and notifications. Starting fresh under the same
+hostname instead, delete the old machine in the Tailscale admin console, pair
+with **Use an existing passkey** (the same key, so GitHub stays as it is), tap
+**Enable notifications** again, and register the dev boxes again. A new
+hostname means a new passkey and key.
+
 ## When something's off
 
 - **`Load key "….pub": bad permissions` / `Permission denied (publickey)`.** The
@@ -286,7 +300,11 @@ needed unless the hostname changes.
 - **The agent doesn't start:** it's skipped while `~/.config/phonekey/token`
   doesn't exist. Once it does: `systemctl --user start phonekey-agent`.
 - **No notification:** check **Send test** in the app, and that the request
-  shows up in the app at all (if so, it's the notification side).
+  shows up in the app at all (if so, it's the notification side). The
+  backend logs what the push service answered:
+  `journalctl -u phonekeyd-you | grep push`.
+- **The agent still uses the old backend:** restart it
+  (`systemctl --user restart phonekey-agent`); a rebuild doesn't.
 - **The page shows "reconnecting…":** it reconnects by itself; **Reload** in
   the header forces it.
 

@@ -229,7 +229,9 @@ Face ID, and a 1Password-held passkey adds 1Password's own unlock.
 2. Open phonekey from the home screen. Push only works inside the installed
    app, which has its own storage separate from Safari.
 3. Enter the code and tap **Create passkey**. If the provider doesn't support
-   PRF, the page says so.
+   PRF, the page says so. If you already have a passkey for this hostname (e.g.
+   after moving the backend to another host), tap **Use an existing passkey**
+   instead: it derives the same key as before.
    - **If iOS offers 1Password instead of iCloud Keychain:** iOS offers
      whichever provider is set as the default. Pick *Passwords* via the sheet's
      other options, or switch 1Password off for that moment under Settings →
@@ -271,10 +273,13 @@ phonekey-agent --backend https://phonekey.<tailnet>.ts.net --token-file ~/.confi
   agent. Signing requests for those keys go to that agent unchanged.
 - **The phone key** comes from the backend, which hands it to registered dev
   boxes. `--keys FILE` pins it instead.
-- **Export the public key** once, to point tools at:
+- **Export the public key** once, to point tools at. The agent lists the
+  phone keys with the comment `phonekey`, before any upstream keys:
   ```sh
-  SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | head -1 > ~/.ssh/phonekey.pub
+  SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/phonekey-agent.sock ssh-add -L | grep ' phonekey$' > ~/.ssh/phonekey.pub
   ```
+  With several passkeys registered, keep the line whose fingerprint
+  (`ssh-keygen -lf`) matches the one the page shows.
 
 On NixOS, `phonekey.nixosModules.phonekey-agent` sets this up per user:
 `programs.phonekey-agent.users.<name> = { backend = …; upstream = …; }` gives
@@ -408,10 +413,10 @@ ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active_auth.pub
   while you're connected with agent forwarding. Without it, phonekey-agent
   offers just the phone keys, and signing with `op-github.pub` fails until you
   switch back.
-- **Scope.** The symlink is global to the machine. For per-shell switching, git can take
-`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, and ssh expands
-environment variables in `IdentityFile`. jj has no per-key environment
-override; it needs a separate `JJ_CONFIG` or `--config`.
+- **Scope.** The symlink is global to the machine. For per-shell switching, git
+  can take `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, and ssh
+  expands environment variables in `IdentityFile`. jj has no per-key
+  environment override; it needs a separate `JJ_CONFIG` or `--config`.
 
 ## Using it
 
@@ -565,7 +570,9 @@ deletes resolved ones after `--retention` (7 days).
   Each web session, and each push subscription made from it, belongs to the
   key that logged in. The page re-sends its existing subscription after each
   login, so a device that switched passkeys isn't cut off when the old key is
-  removed. Removing a key deletes its sessions and subscriptions (foreign
+  removed. A subscription made for another backend's VAPID key (an earlier
+  backend under the same hostname) is replaced instead, when you enable
+  notifications. Removing a key deletes its sessions and subscriptions (foreign
   keys) and denies its pending requests.
 - **Cross-site requests.** State-changing web calls must come from the same
   origin: `Sec-Fetch-Site: same-origin`, or a matching `Origin` header.
