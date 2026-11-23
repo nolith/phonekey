@@ -138,6 +138,17 @@ with-env { SSH_AUTH_SOCK: $"($env.XDG_RUNTIME_DIR)/phonekey-agent.sock" } { ssh-
 phonekey-use phone
 ```
 
+Check that signing works, before touching any other config:
+
+```sh
+echo hello | phonekey-keygen -Y sign -f ~/.ssh/phonekey.pub -n file
+```
+
+A notification arrives on the phone. After you approve, the command prints a
+`-----BEGIN SSH SIGNATURE-----` block. This goes through the same
+`phonekey-keygen` and agent that git and jj will use, and works the same in
+nushell.
+
 git, jj and ssh sign with whatever `~/.ssh/active.pub` points at. Switch with:
 - `phonekey-use phone`: approve on the phone
 - `phonekey-use desktop`: approve with 1Password; needs the forwarded agent,
