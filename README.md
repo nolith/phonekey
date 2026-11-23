@@ -831,13 +831,11 @@ bin/phonekey-sim watch --ask
 
 - **GitHub.** How long it waits during an SSH login decides the agent's
   `--deadline`. Not measured.
-- **The NixOS module on a real host.** The binary has run under the module's
-  restrictions as a user service, but IP filtering, `PrivateUsers`, the
-  dedicated accounts, `phonekeyd-ctl` and the `tailscale serve` helper need the
-  system service manager. A `runNixOSTest` VM test would check all of it
-  repeatedly; it needs KVM, e.g. in CI (GitHub's Linux runners have it).
-- **1Password as the upstream agent.** Proxying is tested with an ordinary
-  in-memory agent, not with 1Password's.
+- **A regression test for the NixOS module.** The module runs in production
+  (the built-in tailnet mode, with the full sandbox, `phonekeyd-ctl` and the
+  agent module). Nothing re-checks the isolation automatically, though, and the
+  `serve.httpsPort` helper hasn't run yet. A `runNixOSTest` VM test would cover
+  both; it needs KVM, e.g. in CI (GitHub's Linux runners have it).
 - **Showing a range before approving.** A grant signs commits you only see
   afterwards. For `jj sign -r X`, the agent knows the command line and its
   working directory. It could run `jj log -r X --ignore-working-copy` there and
@@ -851,8 +849,6 @@ bin/phonekey-sim watch --ask
   - Like all dev box context, it's unverified.
 - **Checkboxes or per-card buttons.** Multi-select only helps when unrelated
   requests are pending at once. Per-card buttons would be simpler.
-- **Upstream order.** `--upstream-first`, to offer 1Password's keys before the
-  phone key.
 - **Rate limits.** `/api/web/nonce` needs no login, and every queued request
   sends a push, so a device on the tailnet (or a dev box token) could fill the
   nonce table or spam notifications.
