@@ -40,6 +40,10 @@ vault.
 
 ## Setting up
 
+For a NixOS host on a tailnet with an iPhone, [QUICKSTART.md](QUICKSTART.md)
+walks through the whole setup. The rest of this section covers the general
+case.
+
 You need four things: the backend running somewhere your phone can reach over
 HTTPS, a passkey paired with it, the agent on each dev box, and git/jj/ssh
 pointed at the agent.
