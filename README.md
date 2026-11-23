@@ -11,9 +11,19 @@ private key is stored anywhere: not on the dev box, not on the backend, not in a
 vault.
 
 Status: proof of concept. The design brief is at
-<https://claude.ai/artifact/U11KvJataYt3YFH1ncZSKN>. The dev box side, the backend
-and the page are tested end to end (see [Development](#development)). Desktop
-Chrome has been used by hand. iOS hasn't been tried yet.
+<https://claude.ai/artifact/U11KvJataYt3YFH1ncZSKN>.
+
+- **Automated:** the dev box side, the backend and the page are tested end to
+  end (see [Development](#development)).
+- **Desktop by hand:** Chrome on macOS, pairing and push.
+- **iPhone by hand**, in the home-screen app, with passkeys in both 1Password
+  and iCloud Keychain:
+  - PRF works with both
+  - push notifications arrive
+  - a `jj sign` over a range of commits works with one approval and a grant,
+    and jj verifies the signatures
+- **Not tried yet:** GitHub; the same passkey on a second device; the NixOS
+  module on a real host.
 
 - [Setting up](#setting-up)
 - [Using it](#using-it)
@@ -204,6 +214,10 @@ Face ID, and a 1Password-held passkey adds 1Password's own unlock.
    app, which has its own storage separate from Safari.
 3. Enter the code and tap **Create passkey**. If the provider doesn't support
    PRF, the page says so.
+   - **If iOS offers 1Password instead of iCloud Keychain:** iOS offers
+     whichever provider is set as the default. Pick *Passwords* via the sheet's
+     other options, or switch 1Password off for that moment under Settings →
+     General → AutoFill & Passwords.
 4. Under **Notifications, grants and keys**, tap **Enable notifications**, then
    **Send test**.
 
@@ -353,7 +367,8 @@ override; it needs a separate `JJ_CONFIG` or `--config`.
   - you tap **End**
 
   It isn't offered for an `ssh` or `ssh-keygen` started on its own, which signs
-  only once.
+  only once. It's not offered for a request that came through a forwarded agent
+  either: those are marked *Forwarded* and always ask.
 - **Separate commands ask separately.** Three `git commit -S` runs in a row are
   three approvals, because each is its own process. Commits made by jj and
   signed when you push need one approval per push.
@@ -505,7 +520,9 @@ deletes resolved ones after `--retention` (7 days).
     connection
   - never for a binding made only to forward the agent
   - unbound sessions are refused unless `--require-session-bind=false`
-  - logins through a forwarded agent are marked as such
+  - any request on a connection with a forwarding binding (a login or a
+    signature) is marked as forwarded: it comes from another host, and the
+    local process details only describe the forwarding ssh
 
   The bound host key is named from known_hosts. Hashed entries are matched
   against the destination on ssh's command line.
@@ -518,9 +535,9 @@ deletes resolved ones after `--retention` (7 days).
     backend.
   - **ssh.** The destination and the git action ("push to stancl/foo") come
     from ssh's arguments.
-  - **ssh-keygen.** The agent reads the file being signed. It uses the file
-    only if its hash matches the one in the SSHSIG blob, and then parses it as
-    a git commit or tag.
+  - **ssh-keygen.** The agent reads the file being signed, if it's a regular
+    file. It uses the file only if its hash matches the one in the SSHSIG blob,
+    and then parses it as a git commit or tag.
   - **Linux only.** Process inspection is Linux-only. Elsewhere requests simply
     carry less context.
 
@@ -532,12 +549,16 @@ deletes resolved ones after `--retention` (7 days).
 - **Live updates.** The page keeps an EventSource open. Browsers give up
   reconnecting after an HTTP error such as a proxy's 502, so the page
   reconnects by itself.
-- **Preselection.** A new request is preselected only if nothing else was
-  pending, or if it's the one whose notification you tapped. Something that
-  arrives while you're about to approve another request isn't swept into the
-  same approval.
-- **Grants** match on the scope and on the key, and only sign userauth or SSHSIG
-  data.
+- **Preselection.** Only the request whose notification you tapped is
+  preselected, or one that arrives alone into an empty list. Never several at
+  once, so nothing gets swept into an approval unseen.
+- **Grants** match the dev box, the scope and the key. They only sign userauth
+  or SSHSIG data, never forwarded requests, and never while the page is hidden.
+- **Key material** is wiped after each use: the PRF output, the seed copies, and
+  the PKCS#8 buffer used to import the seed. A grant's key is wiped once its
+  last signature is done.
+- **Approvals.** Adding a key without a pairing code, and removing one, first
+  ask for a registered passkey.
 
 ## Threat model
 
@@ -570,6 +591,8 @@ deletes resolved ones after `--retention` (7 days).
   the dev box writes the whole commit, message and change id included. What
   protects you is approving only what you just triggered: the timing, the
   command and the count.
+- **Hosts you forward the agent to** (`ssh -A`) can request signatures too.
+  Their requests are marked *Forwarded* and never auto-signed by a grant.
 - **SSH logins.** Session binding limits signatures to real sessions with the
   server the client verified. With `--require-known-host`, that server has to
   be in known_hosts.
@@ -577,8 +600,12 @@ deletes resolved ones after `--retention` (7 days).
   or the web API (`SameSite=Strict` cookie, same-origin check).
 - **A lost phone** still needs Face ID or the passcode for the passkey. To
   recover: remove the key from GitHub and from phonekeyd (the page or
-  `keys rm`). That also ends every login it opened and the notifications to
-  those devices. Then pair again.
+  `keys rm`). That also ends every login it opened, cutting off live updates to
+  a page still open on the phone, and stops notifications to those devices.
+  Then pair again.
+- **A stolen session cookie** can read pending requests (commands, commit
+  messages, server names) and deny them. It can't sign: signing needs the
+  passkey. It can't add or remove keys: that needs a passkey approval.
 - **A stolen dev box token** can only queue requests, which you'd see and could
   deny. To recover: `devbox rm`.
 - **Compared with 1Password's agent.** Both give one signature per approval and
@@ -592,7 +619,8 @@ Not handled:
   ones work. A stolen session could therefore make the backend send blind POSTs
   to any HTTPS address it can reach. The body is an encrypted notification, and
   the response isn't returned.
-- revoking sessions other than your own (logout)
+- a list of sessions to revoke one by one; removing a key ends all of its
+  sessions at once
 - an audit log beyond `--retention`
 - a client that half-closes its socket is treated as disconnected (OpenSSH
   doesn't do this)
@@ -742,12 +770,19 @@ Things found while testing:
 
 ## Open questions and future work
 
-- **iOS.** PRF with iCloud Keychain and with 1Password inside the home-screen
-  app, Safari's Ed25519 (WebKit bug 262499; the noble fallback covers it if
-  needed), push reliability, and the same key on iPhone and Mac. Diagnostics is
-  built for checking these.
+- **iOS, remaining.** Push reliability over time (Focus modes, permission
+  resets). Whether Safari used its own Ed25519 or the noble fallback; either
+  way, the signatures verified. Diagnostics shows which.
+- **The same key on a second device.** An iCloud Keychain passkey synced to a
+  Mac should derive the same key there. Untested.
 - **GitHub.** How long it waits during an SSH login decides the agent's
   `--deadline`. Not measured.
+- **The NixOS module on a real host.** The units evaluate and score well, and
+  the binary runs under the same restrictions as a user service. But IP
+  filtering, `PrivateUsers`, the dedicated accounts, `phonekeyd-ctl` and the
+  `tailscale serve` helper have only run in that partial form. A
+  `runNixOSTest` VM test would check all of it repeatedly; it needs KVM, e.g. in
+  CI (GitHub's Linux runners have it).
 - **Grants on desktop.** A grant ends when the page is hidden. On macOS, Chrome
   may count a fully covered window as hidden. That costs a re-approval, nothing
   worse. If it's annoying, end grants on hide only on mobile.
@@ -767,3 +802,5 @@ Things found while testing:
   passkey, so not even the page holds a key. It works with OpenSSH servers but
   not GitHub.
 - **An agent module.** NixOS or home-manager, for the dev box side.
+- **Leaner packages.** The package builds all four binaries; separate server
+  and agent packages would keep the server and the sim off dev boxes.
