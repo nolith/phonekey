@@ -513,6 +513,15 @@ deletes resolved ones after `--retention` (7 days).
   the price of deriving an ordinary ed25519 key that GitHub accepts. So the
   backend runs apart from the dev boxes, serves only its own files, and sends a
   strict CSP. A stolen disk or backup of the backend holds no key material.
+- **Browser extensions.** An extension that has access to the backend's site
+  can run code inside the page and see the PRF output, so it can derive the key.
+  No page-level isolation prevents that. Password managers that provide
+  passkeys through an extension (e.g. 1Password in Chrome) see the PRF output
+  by design. The cleanest place to approve is the iPhone home-screen app with
+  iCloud Keychain, since iCloud Keychain passkeys go through iOS rather than an
+  extension. On a desktop, use a browser profile without extensions, or keep
+  extensions off the backend's site (per-extension site access, or Chrome's
+  `runtime_blocked_hosts` policy).
 - **Semi-trusted: the dev box.** Anything running as your user there can:
   - read the agent's token
   - send requests, which still need your approval
