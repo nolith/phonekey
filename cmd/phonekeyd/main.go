@@ -33,7 +33,8 @@ commands:
   devbox list
   devbox rm NAME
   keys                list registered public keys
-  keys rm FINGERPRINT
+  keys rm FINGERPRINT|ID
+                      remove a key: its logins end and its pending requests are denied
 `
 
 func main() {
@@ -246,14 +247,19 @@ func devbox(ctx context.Context, st *store.Store, args []string) error {
 
 func keys(ctx context.Context, st *store.Store, args []string) error {
 	if len(args) == 2 && args[0] == "rm" {
-		return st.RemoveKey(ctx, args[1])
+		k, err := st.RemoveKey(ctx, args[1])
+		if err == nil {
+			fmt.Printf("removed %s (%s)\n", k.Label, k.Fingerprint)
+		}
+		return err
 	}
 	ks, err := st.Keys(ctx)
 	if err != nil {
 		return err
 	}
 	for _, k := range ks {
-		fmt.Printf("%s %s  # %s, %s\n", k.PublicKey, k.Label, k.Fingerprint, time.Unix(k.CreatedAt, 0).Format(time.DateOnly))
+		fmt.Printf("%s %s  # %s, %s, %d logins, %d with notifications\n", k.PublicKey, k.Label, k.Fingerprint,
+			time.Unix(k.CreatedAt, 0).Format(time.DateOnly), k.Logins, k.Notified)
 	}
 	return nil
 }

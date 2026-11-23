@@ -22,6 +22,10 @@ import (
 
 var ErrNotFound = errors.New("not found")
 
+// ErrLastKey is returned when removing the only registered key, which would
+// leave no way to log in without a new pairing code.
+var ErrLastKey = errors.New("can't remove the last key")
+
 // ErrNotPending is returned when resolving a request that's already resolved.
 var ErrNotPending = errors.New("request is not pending")
 
@@ -174,33 +178,56 @@ func (s *Store) KeyByPublicKey(ctx context.Context, publicKey string) (*Key, err
 	return scanKey(s.db.QueryRowContext(ctx, `SELECT `+keyCols+` FROM keys WHERE public_key = ?`, publicKey))
 }
 
+// Keys returns all registered keys with what each one has opened.
 func (s *Store) Keys(ctx context.Context) ([]Key, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+keyCols+` FROM keys ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+keyCols+`,
+		(SELECT count(*) FROM sessions WHERE key_id = keys.id AND expires_at > ?),
+		(SELECT count(*) FROM push_subscriptions WHERE key_id = keys.id)
+		FROM keys ORDER BY id`, now())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Key
 	for rows.Next() {
-		k, err := scanKey(rows)
-		if err != nil {
+		var k Key
+		if err := rows.Scan(&k.ID, &k.PublicKey, &k.Fingerprint, &k.Label, &k.CredentialID, &k.CreatedAt,
+			&k.Logins, &k.Notified); err != nil {
 			return nil, err
 		}
-		out = append(out, *k)
+		out = append(out, k)
 	}
 	return out, rows.Err()
 }
 
-// RemoveKey deletes a key by fingerprint or id.
-func (s *Store) RemoveKey(ctx context.Context, ref string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM keys WHERE fingerprint = ? OR CAST(id AS TEXT) = ?`, ref, ref)
+// RemoveKey revokes a key, given its fingerprint or id: the sessions opened
+// with it and the push subscriptions made from them go with it (foreign
+// keys), and its pending requests are denied. The last key can't be removed.
+func (s *Store) RemoveKey(ctx context.Context, ref string) (*Key, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
+	defer tx.Rollback()
+	k, err := scanKey(tx.QueryRowContext(ctx, `SELECT `+keyCols+` FROM keys WHERE fingerprint = ? OR CAST(id AS TEXT) = ?`, ref, ref))
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM keys`).Scan(&count); err != nil {
+		return nil, err
+	}
+	if count <= 1 {
+		return nil, ErrLastKey
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE requests SET status = ?, resolved_at = ? WHERE public_key = ? AND status = ?`,
+		protocol.StatusDenied, now(), k.PublicKey, protocol.StatusPending); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM keys WHERE id = ?`, k.ID); err != nil {
+		return nil, err
+	}
+	return k, tx.Commit()
 }
 
 // Dev boxes

@@ -409,6 +409,16 @@ async function enablePush() {
   await renderPushState();
 }
 
+// claimPushSubscription records this device's existing push subscription
+// under the current login, so a device that switched passkeys keeps its
+// notifications when the old key is removed. It never asks for permission or
+// creates a subscription.
+async function claimPushSubscription() {
+  if (!("serviceWorker" in navigator) || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const sub = await (await navigator.serviceWorker.getRegistration())?.pushManager.getSubscription();
+  if (sub) await api("POST", "/api/web/push/subscribe", sub.toJSON());
+}
+
 async function renderPushState() {
   let s = "Not supported in this context.";
   if ("serviceWorker" in navigator && "PushManager" in window) {
@@ -544,9 +554,52 @@ function tickCountdowns() {
 }
 
 function renderKeys() {
+  const keys = state.config.keys || [];
   $("keys").replaceChildren(
-    ...(state.config.keys || []).map((k) => h("li", {}, h("strong", {}, k.label), " ", h("code", {}, k.fingerprint))),
+    ...keys.map((k) => {
+      const usage = [
+        k.current ? "logged in on this device" : null,
+        `${k.logins} login${k.logins === 1 ? "" : "s"}`,
+        `${k.notified} with notifications`,
+      ];
+      return h(
+        "li",
+        { class: "key-row" },
+        h(
+          "div",
+          {},
+          h("strong", {}, k.label),
+          " ",
+          h("code", {}, k.fingerprint),
+          h("div", { class: "card-meta" }, usage.filter(Boolean).join(" · ")),
+        ),
+        keys.length > 1 && h("button", { class: "danger small", onclick: () => removeKey(k).catch(setError) }, "Remove"),
+      );
+    }),
   );
+}
+
+// removeKey revokes a key after spelling out what that ends: every login
+// opened with it (and those devices' notifications) and its pending requests.
+async function removeKey(k) {
+  const lines = [`Remove "${k.label}" (${k.fingerprint})?`, ""];
+  lines.push("It can no longer log in here, and its pending requests are denied.");
+  if (k.logins) {
+    lines.push(
+      `${k.logins} device${k.logins === 1 ? "" : "s"} logged in with it will be logged out` +
+        (k.notified ? ` and stop getting notifications (${k.notified}).` : "."),
+    );
+  }
+  if (k.current) lines.push("That includes this device: log in with another passkey afterwards.");
+  lines.push("", "The passkey itself stays in your password manager, and the key on GitHub if you added it there.");
+  if (!confirm(lines.join("\n"))) return;
+  await api("DELETE", `/api/web/keys/${k.id}`);
+  await loadConfig();
+  if (!state.config.logged_in) {
+    state.events?.close();
+    state.events = null;
+  }
+  render();
 }
 
 function renderGrantOptions() {
@@ -588,7 +641,8 @@ async function renderHistory() {
 function render() {
   const c = state.config;
   const loggedIn = c.logged_in;
-  $("status").textContent = loggedIn ? `${(c.keys || []).length} key(s)` : "not logged in";
+  const current = (c.keys || []).find((k) => k.current);
+  $("status").textContent = loggedIn ? `logged in with ${current?.label ?? "a passkey"}` : "not logged in";
   show("pair", !loggedIn);
   show("requests", loggedIn);
   show("setup", loggedIn);
@@ -598,7 +652,10 @@ function render() {
     renderKeys();
     renderGrantOptions();
     renderPushState();
-    if (!state.events) connectEvents();
+    if (!state.events) {
+      connectEvents();
+      claimPushSubscription().catch((e) => console.warn("push subscription", e));
+    }
   }
 }
 

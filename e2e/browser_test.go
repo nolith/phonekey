@@ -25,6 +25,7 @@ import (
 	"phonekey/internal/agent"
 	"phonekey/internal/keyderive"
 	"phonekey/internal/server"
+	"phonekey/internal/sim"
 	"phonekey/internal/store"
 )
 
@@ -317,6 +318,46 @@ func TestBrowser(t *testing.T) {
 		chromedp.WaitVisible(chromedp.ID("diag-out")),
 	)
 	verifyDiag(t, text(t, browser, "diag-out"), "noble")
+
+	// Removing keys from the page. Two accidental keys get paired; removing
+	// one leaves this session alone, removing the key this page logged in
+	// with logs it out, and the other key's session carries on.
+	var extra []*sim.Phone
+	for i, label := range []string{"accidental one", "accidental two"} {
+		code, _ := st.NewPairCode(ctx, time.Minute)
+		p := sim.New(url, bytes.Repeat([]byte{byte(i + 1)}, 32))
+		if err := p.Pair(ctx, code, label); err != nil {
+			t.Fatal(err)
+		}
+		extra = append(extra, p)
+	}
+	removeKey := func(label string) {
+		t.Helper()
+		do(t, browser,
+			chromedp.Evaluate[chromedp.Void](`window.confirm = () => true`),
+			chromedp.Evaluate[chromedp.Void](fmt.Sprintf(
+				`[...document.querySelectorAll('#keys li')].find((li) => li.textContent.includes(%q)).querySelector('button').click()`, label)),
+		)
+	}
+	do(t, browser, chromedp.Navigate(url), chromedp.WaitVisible(chromedp.ID("requests")))
+	if status := text(t, browser, "status"); status != "logged in with virtual authenticator" {
+		t.Fatalf("status %q", status)
+	}
+	do(t, browser, chromedp.Evaluate[chromedp.Void](`document.getElementById('setup-details').open = true`))
+	shot(t, browser, "6-keys")
+	removeKey("accidental one")
+	do(t, browser, chromedp.Poll[chromedp.Void](`!document.getElementById('keys').textContent.includes('accidental one')`))
+	if _, err := extra[0].Pending(ctx); err == nil {
+		t.Fatal("removed key's session still works")
+	}
+	removeKey("virtual authenticator")
+	do(t, browser, chromedp.WaitVisible(chromedp.ID("pair")))
+	if keys, _ := st.Keys(ctx); len(keys) != 1 || keys[0].Label != "accidental two" {
+		t.Fatalf("keys left: %+v", keys)
+	}
+	if _, err := extra[1].Pending(ctx); err != nil {
+		t.Fatalf("remaining key's session ended: %v", err)
+	}
 }
 
 func verifyDiag(t *testing.T, diag, impl string) {

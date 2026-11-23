@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha512"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -355,4 +356,83 @@ func TestPushHoldBack(t *testing.T) {
 	// Another command notifies as usual.
 	create("git:2")
 	waitPushes(3)
+}
+
+func TestRemoveKey(t *testing.T) {
+	pushSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer pushSrv.Close()
+	e := setup(t, server.Config{PushClient: pushSrv.Client()})
+	ctx := context.Background()
+
+	// A second passkey, logged in on another device that also gets
+	// notifications, with a request waiting for it.
+	code, _ := e.store.NewPairCode(ctx, time.Minute)
+	other := sim.New(e.url, []byte("another passkey's prf output!!!!"))
+	if err := other.Pair(ctx, code, "accidental"); err != nil {
+		t.Fatal(err)
+	}
+	sub, _ := json.Marshal(map[string]any{
+		"endpoint": pushSrv.URL + "/push/other",
+		"keys": map[string]string{
+			"p256dh": "BNcRdreALRFXTkOOUHK1EtK2wtaz5Ry4YfYCA_0QTpQtUbVlUls0VJXg7A8u-Ts1XbjhazAkj7I99e8QcYP7DkM",
+			"auth":   "tBHItJI5svbpez7KI4CCXg",
+		},
+	})
+	if err := other.Post(ctx, "/api/web/push/subscribe", json.RawMessage(sub), nil); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := e.backend.Create(ctx, protocol.CreateRequest{PublicKey: other.PublicKey(), Data: sshsigBlob("x")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.phone.Login(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := e.phone.Config(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target protocol.WebKey
+	for _, k := range cfg.Keys {
+		if k.Label == "accidental" {
+			target = k
+		} else if !k.Current {
+			t.Fatalf("own key not marked current: %+v", k)
+		}
+	}
+	if target.Logins != 1 || target.Notified != 1 || target.Current {
+		t.Fatalf("accidental key usage: %+v", target)
+	}
+
+	if err := e.phone.Delete(ctx, fmt.Sprintf("/api/web/keys/%d", target.ID)); err != nil {
+		t.Fatal(err)
+	}
+	// Its login ended, its subscription is gone and its request was denied;
+	// this session is unaffected.
+	if _, err := other.Pending(ctx); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("removed key's session still works: %v", err)
+	}
+	if subs, _ := e.store.PushSubscriptions(ctx); len(subs) != 0 {
+		t.Fatalf("removed key's push subscription kept: %+v", subs)
+	}
+	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if st, err := e.backend.Wait(wctx, pending.ID); err != nil || st.Status != protocol.StatusDenied {
+		t.Fatalf("pending request for removed key: %+v, %v", st, err)
+	}
+	if _, err := e.backend.Create(ctx, protocol.CreateRequest{PublicKey: other.PublicKey(), Data: sshsigBlob("x")}); err == nil {
+		t.Fatal("removed key still accepted for new requests")
+	}
+	if _, err := e.phone.Pending(ctx); err != nil {
+		t.Fatalf("own session ended: %v", err)
+	}
+
+	// The last key stays.
+	cfg, _ = e.phone.Config(ctx)
+	if err := e.phone.Delete(ctx, fmt.Sprintf("/api/web/keys/%d", cfg.Keys[0].ID)); err == nil || !strings.Contains(err.Error(), "409") {
+		t.Fatalf("removing the last key: %v", err)
+	}
 }

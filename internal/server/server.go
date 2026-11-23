@@ -164,6 +164,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/web/events", s.session(s.eventStream))
 	m.HandleFunc("POST /api/web/requests/{id}/signature", s.sameOrigin(s.session(s.submitSignature)))
 	m.HandleFunc("POST /api/web/requests/{id}/deny", s.sameOrigin(s.session(s.denyRequest)))
+	m.HandleFunc("DELETE /api/web/keys/{id}", s.sameOrigin(s.session(s.removeKey)))
 	m.HandleFunc("POST /api/web/push/subscribe", s.sameOrigin(s.session(s.subscribe)))
 	m.HandleFunc("POST /api/web/push/test", s.sameOrigin(s.session(s.testPush)))
 
@@ -511,12 +512,15 @@ func (s *Server) webConfig(w http.ResponseWriter, r *http.Request) {
 		VAPIDPublicKey:  s.vapid,
 		MaxGrantSeconds: int(s.cfg.MaxGrant.Seconds()),
 	}
-	if _, ok := s.sessionKeyID(r); ok {
+	if current, ok := s.sessionKeyID(r); ok {
 		c.LoggedIn = true
 		keys, err := s.store.Keys(r.Context())
 		if err != nil {
 			s.fail(w, r, err)
 			return
+		}
+		for i := range keys {
+			keys[i].Current = keys[i].ID == current
 		}
 		c.Keys = keys
 	}
@@ -617,6 +621,20 @@ func (s *Server) pair(w http.ResponseWriter, r *http.Request) {
 	}
 	key, _ := s.store.KeyByPublicKey(r.Context(), normalizeKey(k))
 	writeJSON(w, http.StatusOK, key)
+}
+
+func (s *Server) removeKey(w http.ResponseWriter, r *http.Request) {
+	k, err := s.store.RemoveKey(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrLastKey) {
+		s.fail(w, r, errorf(http.StatusConflict, "%v", err))
+		return
+	} else if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	s.log.Info("key removed", "fingerprint", k.Fingerprint, "label", k.Label)
+	s.events.notify()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

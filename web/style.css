@@ -183,6 +183,9 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 18px 0; }
 .plain { list-style: none; padding: 0; margin: 0 0 10px; }
 .plain li { padding: 6px 0; border-bottom: 1px solid var(--rule); font-size: 14px; overflow-wrap: anywhere; }
 
+.key-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+button.small { padding: 6px 12px; min-height: 36px; font-size: 14px; flex: none; }
+
 .history .st { font-weight: 600; margin-right: 6px; }
 .history .st-denied { color: var(--danger); }
 .history .st-expired, .history .st-cancelled { color: var(--muted); }

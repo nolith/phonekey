@@ -133,6 +133,12 @@ type WebKey struct {
 	Label        string `json:"label"`
 	CredentialID string `json:"credential_id,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
+	// Logins and Notified count the live web sessions opened with this key
+	// and the push subscriptions made from them. Removing the key ends both.
+	Logins   int `json:"logins"`
+	Notified int `json:"notified"`
+	// Current marks the key the requesting session logged in with.
+	Current bool `json:"current,omitempty"`
 }
 
 // WebConfig is what the page needs before it can do anything.

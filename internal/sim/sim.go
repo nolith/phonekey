@@ -40,6 +40,17 @@ func (p *Phone) Post(ctx context.Context, path string, body, out any) error {
 	return p.do(ctx, http.MethodPost, path, body, out)
 }
 
+// Delete sends an authenticated DELETE to the web API.
+func (p *Phone) Delete(ctx context.Context, path string) error {
+	return p.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
+// Config returns the web config as this phone's session sees it.
+func (p *Phone) Config(ctx context.Context) (*protocol.WebConfig, error) {
+	var c protocol.WebConfig
+	return &c, p.do(ctx, http.MethodGet, "/api/web/config", nil, &c)
+}
+
 func (p *Phone) do(ctx context.Context, method, path string, body, out any) error {
 	resp, err := p.send(ctx, method, path, body)
 	if err != nil {

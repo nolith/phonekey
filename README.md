@@ -257,6 +257,17 @@ override; it needs a separate `JJ_CONFIG` or `--config`.
   the command then fails. Ctrl-C on the dev box withdraws it.
 - **Recent** lists the last signatures: who approved each (you or a grant), the
   command, the dev box, and the full card details.
+- **Keys** (under *Notifications, grants and keys*) lists every registered key,
+  marks the one this device is logged in with, and counts its logins and
+  devices with notifications.
+  - **Remove** revokes a key: its logins end, so those devices are logged out
+    and stop getting notifications, and its pending requests are denied.
+  - Removing the key you're logged in with logs you out on this device, so to
+    clean up several keys, log in with the one you keep first.
+  - The last key can't be removed.
+  - The passkey itself stays in your password manager, and the key on GitHub
+    if you added it there; remove those separately.
+  - `phonekeyd keys rm` does the same from the command line.
 - **Diagnostics** checks PRF and Ed25519 support, derives and shows the key
   (should match on every device), and signs a test message. It prints a
   snippet that verifies the signature with `ssh-keygen -Y verify`.
@@ -348,6 +359,7 @@ deletes resolved ones after `--retention` (7 days).
   - `nonce`, `login`, `pair`, `logout`
   - `requests`, `history`, `events` (SSE)
   - `requests/{id}/signature`, `requests/{id}/deny`
+  - `keys/{id}` (DELETE)
   - `push/subscribe`, `push/test`
 
   All paths are under `/api/web/`.
@@ -357,6 +369,12 @@ deletes resolved ones after `--retention` (7 days).
   therefore needs no Face ID; signing always does.
 - **Pairing** registers a new key. It needs a one-time code from `pair-code`, or
   an existing session.
+- **One user, many keys.** Any registered key can log in and sees everything.
+  Each web session, and each push subscription made from it, belongs to the
+  key that logged in. The page re-sends its existing subscription after each
+  login, so a device that switched passkeys isn't cut off when the old key is
+  removed. Removing a key deletes its sessions and subscriptions (foreign
+  keys) and denies its pending requests.
 - **Cross-site requests.** State-changing web calls must come from the same
   origin: `Sec-Fetch-Site: same-origin`, or a matching `Origin` header.
 - **Content security policy.** The page has a strict CSP: `script-src 'self'`,
@@ -441,8 +459,9 @@ deletes resolved ones after `--retention` (7 days).
 - **Other websites** can't use the passkey (it's bound to the backend's domain)
   or the web API (`SameSite=Strict` cookie, same-origin check).
 - **A lost phone** still needs Face ID or the passcode for the passkey. To
-  recover: remove the key from GitHub and from phonekeyd (`keys rm`), then pair
-  again.
+  recover: remove the key from GitHub and from phonekeyd (the page or
+  `keys rm`). That also ends every login it opened and the notifications to
+  those devices. Then pair again.
 - **A stolen dev box token** can only queue requests, which you'd see and could
   deny. To recover: `devbox rm`.
 - **Compared with 1Password's agent.** Both give one signature per approval and
@@ -482,6 +501,7 @@ nix build                      # the package
   authenticator that supports PRF:
   - pairing, and the JS key derivation matching Go
   - approving `ssh-keygen` signatures, and late arrivals not being preselected
+  - removing keys: another key, then the one the page is logged in with
   - *Approve + rest* covering a rebase, and no grant offered for a one-shot
   - Recent
   - reconnecting after a 502
