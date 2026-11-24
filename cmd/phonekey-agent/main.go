@@ -42,6 +42,7 @@ func main() {
 	requireKnown := flag.Bool("require-known-host", false, "refuse SSH logins to hosts not in known_hosts")
 	knownHosts := flag.String("known-hosts", filepath.Join(home, ".ssh/known_hosts")+",/etc/ssh/ssh_known_hosts",
 		"comma-separated known_hosts files used to name servers (read only)")
+	statusMode := flag.String("program-status", envOr("PHONEKEY_PROGRAM_STATUS", "auto"), "report the agent's state to the terminal with OSC 7501: auto (when stdout is a terminal), on or off ($PHONEKEY_PROGRAM_STATUS)")
 	verbose := flag.Bool("v", false, "debug logging")
 	flag.Parse()
 	// Paths may refer to $HOME or $XDG_RUNTIME_DIR, e.g. from a settings file
@@ -55,6 +56,12 @@ func main() {
 		level = slog.LevelDebug
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	ps, err := newProgramStatus(*statusMode, os.Stdout)
+	if err != nil {
+		fatal(err)
+	}
+	status = ps
 
 	if *backendURL == "" {
 		fatal(errors.New("--backend is required"))
@@ -101,6 +108,7 @@ func main() {
 		KnownHosts:         strings.Split(*knownHosts, ","),
 		Hostname:           hostname,
 		Logger:             log,
+		Status:             ps.update,
 	})
 
 	if err := os.MkdirAll(filepath.Dir(*socket), 0o700); err != nil {
@@ -123,9 +131,11 @@ func main() {
 	}()
 	log.Info("listening", "socket", *socket, "keys", len(ks.get()))
 	fmt.Printf("SSH_AUTH_SOCK=%s; export SSH_AUTH_SOCK;\n", *socket)
+	ps.idle(fmt.Sprintf("%d phone keys on %s", len(ks.get()), *socket))
 	if err := a.Serve(ln); err != nil {
 		fatal(err)
 	}
+	ps.clear()
 }
 
 type keySet struct {
@@ -201,7 +211,11 @@ func envOr(k, def string) string {
 	return def
 }
 
+// status, once set, also reports fatal's error.
+var status *programStatus
+
 func fatal(err error) {
+	status.failed(err)
 	fmt.Fprintln(os.Stderr, "phonekey-agent:", err)
 	os.Exit(1)
 }

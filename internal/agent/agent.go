@@ -42,11 +42,19 @@ type Config struct {
 	KnownHosts       []string
 	Hostname         string
 	Logger           *slog.Logger
+	// Status, if set, gets the status each time a phone request starts or
+	// stops waiting. Calls don't overlap.
+	Status func(Status)
 }
 
 type Agent struct {
 	cfg Config
 	log *slog.Logger
+
+	mu      sync.Mutex
+	next    uint64
+	waiting []pending
+	last    string
 }
 
 func New(cfg Config) *Agent {
@@ -279,7 +287,7 @@ func (c *connAgent) requestContext(data []byte) (protocol.Context, error) {
 	return rc, nil
 }
 
-func (c *connAgent) phoneSign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
+func (c *connAgent) phoneSign(key ssh.PublicKey, data []byte) (_ *ssh.Signature, err error) {
 	rc, err := c.requestContext(data)
 	if err != nil {
 		return nil, err
@@ -299,6 +307,8 @@ func (c *connAgent) phoneSign(key ssh.PublicKey, data []byte) (*ssh.Signature, e
 		return nil, err
 	}
 	c.a.log.Info("waiting for approval", "id", created.ID, "action", rc.Action, "remote", rc.Remote)
+	token := c.a.begin(rc)
+	defer func() { c.a.end(token, err) }()
 	st, err := b.Wait(ctx, created.ID)
 	if err != nil {
 		cctx, ccancel := context.WithTimeout(context.Background(), 5*time.Second)

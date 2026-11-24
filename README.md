@@ -461,6 +461,15 @@ ln -sfn ~/.ssh/phonekey.pub ~/.ssh/active_auth.pub
   - `phonekeyd keys rm` does the same from the command line.
 - **Logins per command.** `jj git clone` logs in twice, so it asks twice
   unless you use *Approve + rest*.
+- **Status in the terminal.** Run in a terminal, the agent reports its state
+  with OSC 7501, the [Program Status
+  Protocol](https://www.superlogical.com/rex/docs/build/program-status):
+  *blocked* (kind *auth*) while a request waits for the phone, with what it is
+  ("approve on phone: ssh github.com: push to stancl/foo"), and *idle*
+  otherwise, with how the last one ended. A terminal that supports it, such as
+  Rex, shows it on the tab; the others ignore it. `--program-status` (or
+  `PHONEKEY_PROGRAM_STATUS`) is `auto` by default, on only when stdout is a
+  terminal, so a systemd journal gets none of it; `on` and `off` force it.
 - **Agent log.** A refused signature shows up twice in the agent's log: once
   from phonekey-agent, once as `agent 13: …` from Go's ssh-agent library.
 - **Diagnostics** checks PRF and Ed25519 support, derives and shows the key
